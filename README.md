@@ -1,24 +1,53 @@
-# Cartola Data Workspace — Spike (Stack GCP/Vertex AI)
+# Fin BigData — Cartola Data Workspace
 
-Versão 100% Google Cloud do spike. Mesmo agente, mesmas tools, agora rodando no **Gemini via Vertex AI** com suporte nativo a **Google Cloud Storage**.
+Projeto 100% baseado em **Google Cloud**, **Vertex AI**, **Gemini**, **Google Cloud Storage** e integração com **Dremio via PAT do próprio usuário**.
 
-## Diferenças vs spike anterior (Claude)
+> Decisão arquitetural: **não existe API Claude neste projeto**. Não haverá `anthropic`, chave Claude, fallback Claude, tool Claude ou qualquer dependência operacional da Anthropic. O agente oficial do projeto é Gemini via Vertex AI.
 
-| Aspecto | Spike Claude | Spike GCP/Vertex (este) |
-|---------|--------------|-------------------------|
-| LLM | Claude (API direta) | Gemini 2.5 Flash via Vertex AI |
-| SDK | `anthropic` | `google-genai` (novo, GA) |
-| Autenticação LLM | API key | Application Default Credentials |
-| Storage de planilha | Local apenas | Local **ou** `gs://` (GCS) |
-| Function calling | `tools=[]` no formato Claude | `Tool(function_declarations=[...])` Gemini |
-| Custo | Pago direto pra Anthropic | Sai dos créditos GCP |
+## Objetivo
+
+Construir uma bancada analítica assistida por IA para trabalhar com:
+
+- planilhas grandes locais ou em `gs://`;
+- arquivos CSV, XLSX e Parquet;
+- dados corporativos já publicados no Dremio;
+- consultas SQL guiadas por agente;
+- análise com evidência, sem jogar arquivo bruto inteiro no modelo.
+
+A IA não analisa arquivo bruto diretamente. A IA orquestra consultas sobre dados estruturados.
+
+## Stack oficial
+
+| Camada | Decisão |
+|--------|---------|
+| Cloud | Google Cloud Platform |
+| LLM | Gemini via Vertex AI |
+| SDK LLM | `google-genai` |
+| Autenticação LLM | Application Default Credentials |
+| Storage | Google Cloud Storage |
+| Engine planilhas | DuckDB |
+| Processamento futuro | Polars / Cloud Run Jobs |
+| Engine corporativa | Dremio SQL Engine |
+| Auth Dremio | Personal Access Token do usuário |
+| Backend futuro | Fastify + TypeScript |
+| Metadata futura | Cloud SQL PostgreSQL |
+
+## O que este projeto NÃO usa
+
+- Não usa Claude API.
+- Não usa Anthropic SDK.
+- Não usa API key da Anthropic.
+- Não usa OpenAI API neste spike.
+- Não usa BigQuery no MVP.
+- Não acessa S3 corporativo diretamente.
+- Não usa service user único do Dremio no MVP.
 
 ## Arquitetura
 
 ```text
                     ┌──────────────────────┐
-                    │     AGENTE           │
-                    │ (Gemini via Vertex)  │
+                    │   AGENTE GEMINI      │
+                    │  Vertex AI / GCP     │
                     └──────────┬───────────┘
                                │
                     AnalyticsEngine (interface)
@@ -27,100 +56,38 @@ Versão 100% Google Cloud do spike. Mesmo agente, mesmas tools, agora rodando no
                 ▼                             ▼
      ┌─────────────────────┐       ┌─────────────────────┐
      │ SpreadsheetEngine   │       │  DremioEngine       │
-     │ (DuckDB + GCS)      │       │  (API REST + PAT)   │
+     │ DuckDB + GCS        │       │  REST API + PAT     │
      └─────────────────────┘       └─────────────────────┘
 ```
 
-A interface `AnalyticsEngine` continua a mesma. Trocar Claude por Gemini só mexeu em `agent.py`. Strategy pattern funciona dos dois lados.
-
-## Setup
-
-### 1. Pré-requisitos GCP
-
-```bash
-# Instalar gcloud CLI (se ainda não tiver)
-# https://cloud.google.com/sdk/docs/install
-
-# Login
-gcloud auth login
-gcloud auth application-default login
-
-# Definir projeto (use o seu projeto com créditos)
-gcloud config set project SEU_PROJECT_ID
-
-# Habilitar Vertex AI API
-gcloud services enable aiplatform.googleapis.com
-```
-
-### 2. Variáveis de ambiente
-
-```bash
-# Obrigatório
-export GOOGLE_CLOUD_PROJECT="seu-projeto-id"
-
-# Opcional (default: us-central1)
-export GOOGLE_CLOUD_LOCATION="us-central1"
-
-# Opcional: trocar o modelo (default: gemini-2.5-flash)
-export GEMINI_MODEL="gemini-2.5-pro"  # mais inteligente, mais caro
-# ou
-export GEMINI_MODEL="gemini-3-flash-preview"  # mais novo
-
-# Para Dremio (pode digitar interativamente também)
-export DREMIO_HOST="https://dremio.empresa.com"
-export DREMIO_PAT="seu_pat"
-
-# Para arquivos no GCS via DuckDB (opcional)
-# Crie HMAC keys em: Cloud Console > Storage > Settings > Interoperability
-export GCS_HMAC_KEY_ID="GOOG..."
-export GCS_HMAC_SECRET="..."
-```
-
-### 3. Dependências Python
-
-```bash
-pip install google-genai duckdb requests polars
-```
-
-### 4. Rodar
-
-```bash
-python main.py
-```
+A interface `AnalyticsEngine` padroniza o acesso às engines. O agente Gemini não precisa saber se está consultando DuckDB ou Dremio. Ele chama ferramentas comuns como `list_tables`, `describe_table`, `sample_rows` e `run_sql`.
 
 ## Modos de uso
 
 ### Modo 1 — Planilha local
 
+O usuário aponta para um arquivo local. A engine carrega o arquivo no DuckDB e o agente Gemini passa a consultar a tabela por SQL.
+
 ```text
-$ python main.py
+python main.py
 Opção [1/2]: 1
 Caminho do arquivo: /caminho/para/vendas.xlsx
-  Nome da tabela [vendas]:
-  ✓ 'vendas': 250,000 linhas, 12 colunas
-Caminho do arquivo: <ENTER>
-
-Agente pronto. Engine: DuckDB
-Modelo: gemini-2.5-flash (via Vertex AI)
-
-💬 Você: qual região vendeu mais no Q4?
-🤔 Pensando...
-  [tool] list_tables({})
-  [tool] describe_table({"table_name": "vendas"})
-  [tool] sample_rows({"table_name": "vendas"})
-  [tool] run_sql({"query": "SELECT regiao, SUM(valor) ..."})
-
-🤖 Agente:
-A região Sudeste liderou no Q4 com R$ 12.4M, seguida do Sul com R$ 8.1M...
+Nome da tabela [vendas]:
 ```
 
-### Modo 2 — Planilha no GCS
+### Modo 2 — Planilha no Google Cloud Storage
+
+O usuário aponta para um arquivo no GCS.
 
 ```text
 Caminho do arquivo: gs://meu-bucket/vendas/2025-q4.parquet
 ```
 
-### Modo 3 — Dremio
+O DuckDB usa suporte a GCS via extensão `httpfs`.
+
+### Modo 3 — Dremio via PAT
+
+O usuário informa o host do Dremio e seu próprio Personal Access Token.
 
 ```text
 Opção [1/2]: 2
@@ -128,43 +95,147 @@ Host do Dremio: https://dremio.empresa.com
 Personal Access Token: ********
 É Dremio Cloud? [s/N]: n
 Workspaces para listar: Comercial,Financeiro
-  ✓ Conectado. 47 tabelas visíveis.
+```
 
-💬 Você: vendas vs inadimplência por empreendimento
+As permissões são herdadas do próprio Dremio. O app não cria uma camada paralela de autorização.
+
+## Setup GCP
+
+### 1. Instalar e autenticar gcloud
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project SEU_PROJECT_ID
+```
+
+### 2. Habilitar Vertex AI
+
+```bash
+gcloud services enable aiplatform.googleapis.com
+```
+
+### 3. Variáveis de ambiente
+
+```bash
+export GOOGLE_CLOUD_PROJECT="seu-projeto-id"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+
+# Modelo padrão do agente
+export GEMINI_MODEL="gemini-2.5-flash"
+
+# Dremio, se quiser evitar digitar no terminal
+export DREMIO_HOST="https://dremio.empresa.com"
+export DREMIO_PAT="seu_pat"
+
+# Opcional para GCS via DuckDB
+export GCS_HMAC_KEY_ID="GOOG..."
+export GCS_HMAC_SECRET="..."
+```
+
+## Dependências Python
+
+```bash
+pip install google-genai duckdb requests polars
+```
+
+## Rodar
+
+```bash
+python main.py
 ```
 
 ## Estrutura de arquivos
 
-| Arquivo | O que tem | Mudou vs spike Claude? |
-|---------|-----------|------------------------|
-| `config.py` | Interface `AnalyticsEngine` | Não |
-| `spreadsheet_engine.py` | DuckDB + suporte GCS | Sim (adicionou httpfs/GCS) |
-| `dremio_engine.py` | Dremio REST API | Não |
-| `agent.py` | Loop Gemini + tools | **Sim — reescrito para Gemini** |
-| `main.py` | Terminal interativo | Sim (validação ADC e GOOGLE_CLOUD_PROJECT) |
+| Arquivo | Responsabilidade |
+|---------|------------------|
+| `main.py` | Entrada CLI do spike, escolha entre planilha e Dremio |
+| `config.py` | Contratos comuns: `AnalyticsEngine`, `QueryResult`, `TableInfo` |
+| `spreadsheet_engine.py` | Engine DuckDB para arquivos locais ou GCS |
+| `dremio_engine.py` | Engine Dremio via REST API e PAT do usuário |
+| `agent.py` | Agente Gemini via Vertex AI com function calling |
+
+## Ferramentas do agente
+
+O agente Gemini opera com function calling e pode chamar:
+
+- `list_tables()` para descobrir tabelas disponíveis;
+- `describe_table(table_name)` para ler schema;
+- `sample_rows(table_name)` para entender amostras reais;
+- `run_sql(query)` para executar consultas SQL.
+
+Regras importantes:
+
+1. O agente deve listar tabelas antes de responder.
+2. O agente deve descrever e amostrar tabelas antes de escrever SQL.
+3. O agente deve usar SQL agregado ou filtrado, nunca trazer milhões de linhas para o chat.
+4. O agente deve mostrar evidência e SQL usado.
+5. O agente deve perguntar quando não souber o significado de uma coluna.
+
+## Decisão sobre Dremio
+
+Mesmo no modo Dremio, o projeto continua 100% Google Cloud na camada de IA e aplicação.
+
+O Dremio entra como engine corporativa de dados. O agente continua sendo Gemini via Vertex AI.
+
+Fluxo:
+
+1. Usuário informa PAT do Dremio.
+2. App valida acesso.
+3. App lista datasets permitidos.
+4. Gemini decide quais tools chamar.
+5. Queries são executadas no Dremio.
+6. A resposta final é gerada pelo Gemini com evidências.
 
 ## Custos esperados
 
-Com `gemini-2.5-flash` (modelo padrão), uma conversa típica de 5-10 turnos custa **menos de USD 0.01**. Seus créditos GCP devem durar muito tempo nesse tier.
+Com `gemini-2.5-flash`, uma conversa típica de 5 a 10 turnos tende a custar centavos ou menos, dependendo de tokens, schemas e resultados retornados.
 
-Se trocar para `gemini-2.5-pro`, custo é ~10x maior mas a qualidade do SQL gerado também sobe (vale para queries mais complexas).
+Se trocar para `gemini-2.5-pro`, o custo sobe, mas pode valer para análises mais complexas.
 
-## Próximos passos depois de validar
+## Próximos passos
 
-1. **Subir esse spike pra Cloud Run** (deploy serverless, fica acessível pra time)
-2. **Trocar terminal por Streamlit** (Cloud Run hospeda Streamlit também)
-3. **Adicionar Cloud SQL** pra persistir conversas e enriquecimento de metadados
-4. **Adicionar BigQuery como terceira engine** (se um dia precisar — basta criar `bigquery_engine.py`)
-5. **Service Account dedicada** em vez de ADC pessoal (pra rodar em produção)
+1. Validar o spike localmente com `GOOGLE_CLOUD_PROJECT` e ADC.
+2. Testar modo planilha com CSV/XLSX.
+3. Testar modo Dremio com PAT real.
+4. Revisar código para remover qualquer resquício conceitual de Claude.
+5. Evoluir para Fastify + TypeScript no backend.
+6. Adicionar modo assistido para joins.
+7. Subir workers e API no Cloud Run.
+8. Persistir metadata em Cloud SQL PostgreSQL.
 
 ## Troubleshooting
 
-**`gcloud: command not found`** → instalar Google Cloud SDK
+**`gcloud: command not found`**
 
-**`Could not automatically determine credentials`** → rodar `gcloud auth application-default login`
+Instalar Google Cloud SDK.
 
-**`PERMISSION_DENIED: Vertex AI API has not been used`** → habilitar a API: `gcloud services enable aiplatform.googleapis.com`
+**`Could not automatically determine credentials`**
 
-**`PERMISSION_DENIED on project XXX`** → confirmar que `GOOGLE_CLOUD_PROJECT` está com o ID correto e que sua conta tem permissão `Vertex AI User`
+Rodar:
 
-**Erro ao ler `gs://...`** → configurar HMAC keys ou fazer login com conta que tem acesso ao bucket
+```bash
+gcloud auth application-default login
+```
+
+**`PERMISSION_DENIED: Vertex AI API has not been used`**
+
+Rodar:
+
+```bash
+gcloud services enable aiplatform.googleapis.com
+```
+
+**`PERMISSION_DENIED on project`**
+
+Confirmar `GOOGLE_CLOUD_PROJECT` e permissão `Vertex AI User`.
+
+**Erro ao ler `gs://...`**
+
+Configurar HMAC keys ou garantir que a conta/ambiente tenha permissão no bucket.
+
+## Princípio do projeto
+
+> O agente não substitui o analista. Ele vira o copiloto operacional da bancada analítica.
+
+Sem Claude. Sem gambiarra multi-cloud no MVP. Sem jogar planilha gigante dentro do prompt. É GCP + Gemini + dados estruturados.
