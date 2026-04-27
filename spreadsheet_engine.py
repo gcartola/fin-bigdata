@@ -1,9 +1,28 @@
+import re
 import time
 from pathlib import Path
 
 import duckdb
 
 from config import AnalyticsEngine, QueryResult, TableInfo
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _normalize_identifier(value: str) -> str:
+    normalized = re.sub(r"\W+", "_", value.strip().lower()).strip("_")
+    if not normalized:
+        normalized = "table"
+    if normalized[0].isdigit():
+        normalized = f"t_{normalized}"
+    return normalized
+
+
+def _quote_identifier(value: str) -> str:
+    if not _IDENTIFIER_RE.match(value):
+        raise ValueError(f"Identificador inválido: {value}")
+    return f'"{value}"'
 
 
 class SpreadsheetEngine(AnalyticsEngine):
@@ -27,13 +46,16 @@ class SpreadsheetEngine(AnalyticsEngine):
     def configure_gcs(self, hmac_key_id: str | None = None, hmac_secret: str | None = None):
         self._ensure_extension("httpfs")
         if hmac_key_id and hmac_secret:
-            self.conn.execute(f"""
+            self.conn.execute(
+                """
                 CREATE OR REPLACE SECRET gcs_secret (
                     TYPE GCS,
-                    KEY_ID '{hmac_key_id}',
-                    SECRET '{hmac_secret}'
+                    KEY_ID ?,
+                    SECRET ?
                 )
-            """)
+                """,
+                [hmac_key_id, hmac_secret],
+            )
 
     def load_file(self, file_path: str, table_name: str | None = None) -> str:
         is_gcs = file_path.startswith("gs://")
@@ -46,25 +68,30 @@ class SpreadsheetEngine(AnalyticsEngine):
 
         if table_name is None:
             base = file_path.split("/")[-1]
-            table_name = Path(base).stem.lower().replace("-", "_").replace(" ", "_")
+            table_name = Path(base).stem
 
+        table_name = _normalize_identifier(table_name)
+        quoted_table = _quote_identifier(table_name)
         ext = file_path.lower().split(".")[-1]
 
         if ext == "csv":
             self.conn.execute(
-                f"CREATE OR REPLACE TABLE {table_name} AS "
-                f"SELECT * FROM read_csv_auto('{file_path}')"
+                f"CREATE OR REPLACE TABLE {quoted_table} AS "
+                "SELECT * FROM read_csv_auto(?)",
+                [file_path],
             )
         elif ext in ("xlsx", "xls"):
             self._ensure_extension("excel")
             self.conn.execute(
-                f"CREATE OR REPLACE TABLE {table_name} AS "
-                f"SELECT * FROM read_xlsx('{file_path}')"
+                f"CREATE OR REPLACE TABLE {quoted_table} AS "
+                "SELECT * FROM read_xlsx(?)",
+                [file_path],
             )
         elif ext == "parquet":
             self.conn.execute(
-                f"CREATE OR REPLACE TABLE {table_name} AS "
-                f"SELECT * FROM read_parquet('{file_path}')"
+                f"CREATE OR REPLACE TABLE {quoted_table} AS "
+                "SELECT * FROM read_parquet(?)",
+                [file_path],
             )
         else:
             raise ValueError(f"Formato não suportado: {ext}")
@@ -76,22 +103,25 @@ class SpreadsheetEngine(AnalyticsEngine):
         return [self.describe_table(name) for name in self._loaded_tables]
 
     def describe_table(self, table_name: str) -> TableInfo:
-        schema_rows = self.conn.execute(f"DESCRIBE {table_name}").fetchall()
+        table_name = _normalize_identifier(table_name)
+        quoted_table = _quote_identifier(table_name)
+        schema_rows = self.conn.execute(f"DESCRIBE {quoted_table}").fetchall()
         columns = [
             {"name": row[0], "type": row[1], "nullable": row[2] == "YES"}
             for row in schema_rows
         ]
-        row_count = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        row_count = self.conn.execute(f"SELECT COUNT(*) FROM {quoted_table}").fetchone()[0]
         return TableInfo(
             name=table_name,
-            full_path=table_name,
+            full_path=quoted_table,
             columns=columns,
             row_count=row_count,
             description=f"Carregada de: {self._loaded_tables.get(table_name, '?')}",
         )
 
     def sample_rows(self, table_name: str, n: int = 5) -> QueryResult:
-        return self.run_sql(f"SELECT * FROM {table_name} LIMIT {n}")
+        table_name = _normalize_identifier(table_name)
+        return self.run_sql(f"SELECT * FROM {_quote_identifier(table_name)} LIMIT {int(n)}")
 
     def run_sql(self, query: str) -> QueryResult:
         start = time.time()
