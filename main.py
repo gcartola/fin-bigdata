@@ -1,7 +1,10 @@
 import os
 import sys
-import subprocess
+from getpass import getpass
 from pathlib import Path
+
+import google.auth
+from google.auth.exceptions import DefaultCredentialsError
 
 from spreadsheet_engine import SpreadsheetEngine
 from dremio_engine import DremioEngine
@@ -9,13 +12,15 @@ from agent import Agent
 
 
 def check_gcp_auth() -> bool:
+    """Valida Application Default Credentials sem depender do gcloud CLI.
+
+    Funciona localmente com `gcloud auth application-default login` e também
+    em Cloud Run usando a service account do runtime.
+    """
     try:
-        result = subprocess.run(
-            ["gcloud", "auth", "application-default", "print-access-token"],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        return True
+    except DefaultCredentialsError:
         return False
 
 
@@ -56,7 +61,7 @@ def setup_dremio() -> DremioEngine:
     print("\n=== MODO DREMIO ===\n")
 
     host = os.getenv("DREMIO_HOST") or input("Host do Dremio: ").strip()
-    pat = os.getenv("DREMIO_PAT") or input("Personal Access Token: ").strip()
+    pat = os.getenv("DREMIO_PAT") or getpass("Personal Access Token: ").strip()
 
     is_cloud = input("É Dremio Cloud? [s/N]: ").strip().lower() == "s"
     project_id = None
@@ -64,11 +69,14 @@ def setup_dremio() -> DremioEngine:
         project_id = os.getenv("DREMIO_PROJECT_ID") or input("Project ID Dremio Cloud: ").strip()
 
     paths = input("Workspaces para listar (vírgula, ENTER p/ todos): ").strip()
-    allowed = [p.strip() for p in paths.split(",")] if paths else None
+    allowed = [p.strip() for p in paths.split(",") if p.strip()] if paths else None
 
     engine = DremioEngine(
-        host=host, pat=pat, project_id=project_id,
-        is_cloud=is_cloud, allowed_paths=allowed,
+        host=host,
+        pat=pat,
+        project_id=project_id,
+        is_cloud=is_cloud,
+        allowed_paths=allowed,
     )
 
     print("\nValidando conexão...")
@@ -82,10 +90,10 @@ def setup_dremio() -> DremioEngine:
 
 
 def chat_loop(agent: Agent):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Agente pronto. Engine: {agent.engine.engine_name}")
     print(f"Modelo: {agent.model} (via Vertex AI)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("Digite suas perguntas. Ctrl+C ou 'sair' para encerrar.\n")
 
     while True:
@@ -112,7 +120,8 @@ def chat_loop(agent: Agent):
 def main():
     if not check_gcp_auth():
         print("❌ Application Default Credentials não configurado.")
-        print("   Rode: gcloud auth application-default login")
+        print("   Local: rode `gcloud auth application-default login`.")
+        print("   Cloud Run: confira a service account do serviço.")
         sys.exit(1)
 
     project = os.getenv("GOOGLE_CLOUD_PROJECT")
