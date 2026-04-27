@@ -1,0 +1,5 @@
+google-genai
+google-auth
+duckdb
+requests
+polars
