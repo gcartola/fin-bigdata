@@ -235,24 +235,33 @@ def setup_spreadsheet_ui():
 
 def setup_dremio_ui():
     st.subheader("Modo Dremio")
-    st.caption("Use o PAT do próprio usuário. O agente continua sendo Gemini via Vertex AI.")
+    st.caption("Use PAT individual ou um PAT de serviço vindo do Secret Manager.")
 
     default_host = os.getenv("DREMIO_HOST", "")
     host = st.text_input("Host do Dremio", value=default_host, placeholder="https://dremio.empresa.com")
-    pat = st.text_input(
-        "Personal Access Token",
-        value="",
-        type="password",
-        placeholder="Cole aqui o seu PAT do Dremio",
-    )
+    server_pat = os.getenv("DREMIO_PAT", "").strip()
+    use_server_pat = False
+    if server_pat:
+        use_server_pat = st.checkbox("Usar PAT de serviço configurado no servidor", value=False)
+
+    pat = ""
+    if not use_server_pat:
+        pat = st.text_input(
+            "Personal Access Token",
+            value="",
+            type="password",
+            placeholder="Cole aqui o seu PAT do Dremio",
+        )
+    effective_pat = server_pat if use_server_pat else pat
+
     is_cloud = st.checkbox("É Dremio Cloud?", value=False)
     project_id = st.text_input("Project ID Dremio Cloud", value=os.getenv("DREMIO_PROJECT_ID", "")) if is_cloud else None
     paths_raw = st.text_input("Workspaces para listar", placeholder="Comercial,Financeiro")
 
-    if st.button("Conectar Dremio", type="primary", disabled=not host or not pat):
+    if st.button("Conectar Dremio", type="primary", disabled=not host or not effective_pat):
         allowed = [p.strip() for p in paths_raw.split(",") if p.strip()] if paths_raw else None
         try:
-            engine = DremioEngine(host=host, pat=pat, project_id=project_id, is_cloud=is_cloud, allowed_paths=allowed)
+            engine = DremioEngine(host=host, pat=effective_pat, project_id=project_id, is_cloud=is_cloud, allowed_paths=allowed)
             tables = engine.list_tables()
             agent = create_agent(engine)
             if agent:
