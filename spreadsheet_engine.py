@@ -1,8 +1,11 @@
 import re
+import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import duckdb
+from google.cloud import storage
 
 from config import AnalyticsEngine, QueryResult, TableInfo
 
@@ -25,11 +28,19 @@ def _quote_identifier(value: str) -> str:
     return f'"{value}"'
 
 
+def _parse_gcs_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme != "gs" or not parsed.netloc or not parsed.path:
+        raise ValueError(f"URI GCS inválida: {uri}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
 class SpreadsheetEngine(AnalyticsEngine):
     def __init__(self, db_path: str = ":memory:"):
         self.conn = duckdb.connect(db_path)
         self._loaded_tables: dict[str, str] = {}
         self._extensions_loaded: set[str] = set()
+        self._staged_files: list[str] = []
 
     def _ensure_extension(self, name: str):
         if name in self._extensions_loaded:
@@ -57,22 +68,39 @@ class SpreadsheetEngine(AnalyticsEngine):
                 [hmac_key_id, hmac_secret],
             )
 
+    def _stage_gcs_file(self, gcs_uri: str) -> str:
+        bucket_name, object_name = _parse_gcs_uri(gcs_uri)
+        suffix = Path(object_name).suffix
+        staged = tempfile.NamedTemporaryFile(prefix="fin_bigdata_", suffix=suffix, delete=False)
+        staged.close()
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        if not blob.exists():
+            raise FileNotFoundError(f"Arquivo GCS não encontrado: {gcs_uri}")
+
+        blob.download_to_filename(staged.name)
+        self._staged_files.append(staged.name)
+        return staged.name
+
     def load_file(self, file_path: str, table_name: str | None = None) -> str:
+        source_path = file_path
         is_gcs = file_path.startswith("gs://")
 
         if is_gcs:
-            self._ensure_extension("httpfs")
+            file_path = self._stage_gcs_file(file_path)
 
-        if not is_gcs and not Path(file_path).exists():
-            raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+        if not Path(file_path).exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {source_path}")
 
         if table_name is None:
-            base = file_path.split("/")[-1]
+            base = source_path.split("/")[-1]
             table_name = Path(base).stem
 
         table_name = _normalize_identifier(table_name)
         quoted_table = _quote_identifier(table_name)
-        ext = file_path.lower().split(".")[-1]
+        ext = source_path.lower().split(".")[-1]
 
         if ext == "csv":
             self.conn.execute(
@@ -96,7 +124,7 @@ class SpreadsheetEngine(AnalyticsEngine):
         else:
             raise ValueError(f"Formato não suportado: {ext}")
 
-        self._loaded_tables[table_name] = file_path
+        self._loaded_tables[table_name] = source_path
         return table_name
 
     def list_tables(self) -> list[TableInfo]:
