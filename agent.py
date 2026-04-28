@@ -17,10 +17,7 @@ def build_tools() -> list[types.Tool]:
                         "Lista todas as tabelas disponíveis na engine atual. "
                         "Use isso PRIMEIRO quando o usuário fizer uma pergunta."
                     ),
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={},
-                    ),
+                    parameters=types.Schema(type=types.Type.OBJECT, properties={}),
                 ),
                 types.FunctionDeclaration(
                     name="describe_table",
@@ -100,6 +97,10 @@ REGRAS DE TRABALHO:
    - Sugira próximas perguntas que o usuário poderia fazer
 6. Se você não tem certeza sobre o significado de uma coluna, PERGUNTE
    antes de inventar uma interpretação.
+7. Quando o usuário pedir download, exportação, tabela completa ou arquivo,
+   gere uma consulta SQL que retorne o resultado completo filtrado. Não responda
+   que não consegue gerar arquivo. O frontend disponibilizará os botões de
+   download. Use LIMIT apenas quando o usuário pedir amostra ou preview.
 
 ESTILO:
 - Direto, sem rodeios. Você é colega, não assistente bajulador.
@@ -109,13 +110,7 @@ ESTILO:
 
 
 class Agent:
-    def __init__(
-        self,
-        engine: AnalyticsEngine,
-        model: str = "gemini-2.5-flash",
-        project_id: str | None = None,
-        location: str = "us-central1",
-    ):
+    def __init__(self, engine: AnalyticsEngine, model: str = "gemini-2.5-flash", project_id: str | None = None, location: str = "us-central1"):
         self.engine = engine
         self.model = model
         self.client = genai.Client(
@@ -126,6 +121,7 @@ class Agent:
         self.tools = build_tools()
         self.system = system_instruction(engine)
         self.conversation: list[types.Content] = []
+        self.last_query_result = None
 
     def _execute_tool(self, name: str, args: dict) -> str:
         try:
@@ -145,10 +141,7 @@ class Agent:
 
             if name == "describe_table":
                 info = self.engine.describe_table(args["table_name"])
-                cols = "\n".join(
-                    f"- `{c['name']}` ({c['type']})"
-                    for c in info.columns
-                )
+                cols = "\n".join(f"- `{c['name']}` ({c['type']})" for c in info.columns)
                 count_str = f"{info.row_count:,} linhas\n" if info.row_count else ""
                 return f"**{info.full_path}**\n{count_str}\nColunas:\n{cols}"
 
@@ -158,6 +151,7 @@ class Agent:
 
             if name == "run_sql":
                 result = self.engine.run_sql(args["query"])
+                self.last_query_result = result
                 return (
                     f"Query executada em {result.execution_time_ms}ms. "
                     f"{result.row_count} linhas retornadas.\n\n"
@@ -169,33 +163,21 @@ class Agent:
             return f"ERRO: {e}"
 
     def chat(self, user_message: str) -> str:
-        self.conversation.append(
-            types.Content(
-                role="user",
-                parts=[types.Part(text=user_message)],
-            )
-        )
+        self.conversation.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
         max_iterations = 15
         for _ in range(max_iterations):
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=self.conversation,
-                config=types.GenerateContentConfig(
-                    system_instruction=self.system,
-                    tools=self.tools,
-                    temperature=0.2,
-                ),
+                config=types.GenerateContentConfig(system_instruction=self.system, tools=self.tools, temperature=0.2),
             )
 
             candidate = response.candidates[0]
             content = candidate.content
             self.conversation.append(content)
 
-            function_calls = [
-                part.function_call for part in content.parts
-                if part.function_call is not None
-            ]
+            function_calls = [part.function_call for part in content.parts if part.function_call is not None]
 
             if not function_calls:
                 final_text = ""
@@ -211,19 +193,9 @@ class Agent:
                 print(f"  [tool] {fc.name}({preview})")
                 result_str = self._execute_tool(fc.name, args)
                 function_response_parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=fc.name,
-                            response={"result": result_str},
-                        )
-                    )
+                    types.Part(function_response=types.FunctionResponse(name=fc.name, response={"result": result_str}))
                 )
 
-            self.conversation.append(
-                types.Content(
-                    role="user",
-                    parts=function_response_parts,
-                )
-            )
+            self.conversation.append(types.Content(role="user", parts=function_response_parts))
 
         return "[Limite de iterações atingido sem resposta final]"
