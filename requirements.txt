@@ -3,3 +3,5 @@ google-auth
 duckdb
 requests
 polars
+streamlit
+openpyxl
