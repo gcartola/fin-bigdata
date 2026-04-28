@@ -128,7 +128,12 @@ def setup_dremio_ui():
 
     default_host = os.getenv("DREMIO_HOST", "")
     host = st.text_input("Host do Dremio", value=default_host, placeholder="https://dremio.empresa.com")
-    pat = st.text_input("Personal Access Token", value=os.getenv("DREMIO_PAT", ""), type="password")
+    pat = st.text_input(
+        "Personal Access Token",
+        value="",
+        type="password",
+        placeholder="Cole aqui o seu PAT do Dremio",
+    )
     is_cloud = st.checkbox("É Dremio Cloud?", value=False)
     project_id = st.text_input("Project ID Dremio Cloud", value=os.getenv("DREMIO_PROJECT_ID", "")) if is_cloud else None
     paths_raw = st.text_input("Workspaces para listar", placeholder="Comercial,Financeiro")
