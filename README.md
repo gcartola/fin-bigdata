@@ -16,6 +16,70 @@ Construir uma bancada analítica assistida por IA para trabalhar com:
 
 A IA não analisa arquivo bruto diretamente. A IA orquestra consultas sobre dados estruturados.
 
+## Status atual: spike técnico
+
+Este repositório ainda é um **spike técnico**, não o produto final.
+
+Um spike é um experimento curto para reduzir incerteza antes de investir na construção do MVP. A meta aqui não é ter UX final, autenticação corporativa completa ou arquitetura definitiva. A meta é provar que o núcleo técnico funciona.
+
+Fluxo de evolução esperado:
+
+```text
+Ideia → Spike → MVP → Produto interno
+```
+
+### Questões que este spike precisa responder
+
+Antes de evoluir para MVP, precisamos validar objetivamente:
+
+1. **Gemini via Vertex AI consegue orquestrar tools com consistência?**
+   - O agente chama `list_tables`, `describe_table`, `sample_rows` e `run_sql` na ordem certa?
+   - Ele corrige SQL quando recebe erro?
+   - Ele evita inventar colunas?
+
+2. **DuckDB é suficiente para consultar planilhas locais e arquivos em GCS?**
+   - CSV, XLSX e Parquet carregam bem?
+   - Arquivos grandes continuam performáticos?
+   - O suporte a `gs://` via `httpfs` é estável no ambiente GCP?
+
+3. **Dremio via PAT funciona bem como engine corporativa?**
+   - O app lista apenas datasets que o usuário pode acessar?
+   - O PAT do usuário herda as permissões corretamente?
+   - As queries via REST API retornam rápido o bastante?
+
+4. **A interface `AnalyticsEngine` segura os dois mundos?**
+   - O mesmo agente consegue consultar DuckDB e Dremio sem mudar lógica?
+   - Os retornos de `QueryResult` e `TableInfo` são suficientes?
+   - O contrato atual suporta outras engines no futuro, se necessário?
+
+5. **O agente gera SQL útil sem depender de contexto manual excessivo?**
+   - Ele entende schemas a partir das tools?
+   - Ele usa amostras antes de assumir significado de coluna?
+   - Ele entrega resposta com SQL e evidência?
+
+6. **O modo Dremio continua 100% alinhado à arquitetura Google Cloud?**
+   - Dremio entra apenas como engine de dados.
+   - O raciocínio e a resposta final continuam com Gemini via Vertex AI.
+   - Não existe chamada para Claude, Anthropic ou outro provedor LLM.
+
+7. **Quais pontos bloqueiam a ida para MVP?**
+   - Falta persistência de metadata?
+   - Falta histórico de conversas?
+   - Falta controle de custo por usuário?
+   - Falta modo assistido para joins?
+   - Falta deploy em Cloud Run?
+
+### Critério para sair de spike e virar MVP
+
+Este projeto começa a virar MVP quando conseguirmos demonstrar:
+
+- um usuário consegue carregar uma planilha e perguntar sobre ela;
+- um usuário consegue conectar no Dremio com PAT e consultar datasets permitidos;
+- Gemini chama tools corretamente e responde com evidência;
+- o mesmo agente funciona sobre DuckDB e Dremio;
+- o sistema não depende de Claude ou APIs externas fora do desenho GCP;
+- existe plano claro para Fastify, Cloud Run, Cloud SQL e modo assistido de joins.
+
 ## Stack oficial
 
 | Camada | Decisão |
@@ -136,7 +200,7 @@ export GCS_HMAC_SECRET="..."
 ## Dependências Python
 
 ```bash
-pip install google-genai duckdb requests polars
+pip install -r requirements.txt
 ```
 
 ## Rodar
@@ -154,6 +218,7 @@ python main.py
 | `spreadsheet_engine.py` | Engine DuckDB para arquivos locais ou GCS |
 | `dremio_engine.py` | Engine Dremio via REST API e PAT do usuário |
 | `agent.py` | Agente Gemini via Vertex AI com function calling |
+| `requirements.txt` | Dependências Python do spike |
 
 ## Ferramentas do agente
 
