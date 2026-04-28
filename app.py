@@ -1,7 +1,9 @@
 import os
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from agent import Agent
@@ -9,11 +11,7 @@ from dremio_engine import DremioEngine
 from spreadsheet_engine import SpreadsheetEngine
 
 
-st.set_page_config(
-    page_title="Fin BigData",
-    page_icon="📊",
-    layout="wide",
-)
+st.set_page_config(page_title="Fin BigData", page_icon="📊", layout="wide")
 
 
 def init_state():
@@ -43,7 +41,6 @@ def create_agent(engine):
 
 
 def save_uploaded_file(uploaded_file) -> str:
-    suffix = Path(uploaded_file.name).suffix
     tmp_dir = Path(tempfile.gettempdir()) / "fin-bigdata-upload"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     target = tmp_dir / uploaded_file.name
@@ -51,15 +48,50 @@ def save_uploaded_file(uploaded_file) -> str:
     return str(target)
 
 
+def render_download_buttons():
+    agent = st.session_state.get("agent")
+    if not agent:
+        return
+
+    result = getattr(agent, "last_query_result", None)
+    if not result or not result.rows:
+        return
+
+    df = pd.DataFrame(result.rows, columns=result.columns)
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+
+    excel_buffer = BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="resultado")
+
+    st.divider()
+    st.caption(f"Resultado disponível para download: {len(df):,} linhas")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            label="Baixar CSV",
+            data=csv_bytes,
+            file_name="resultado_fin_bigdata.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with col2:
+        st.download_button(
+            label="Baixar Excel",
+            data=excel_buffer.getvalue(),
+            file_name="resultado_fin_bigdata.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+
 def setup_spreadsheet_ui():
     st.subheader("Modo Planilha")
     st.caption("Carregue CSV, XLSX ou Parquet. O spike usa DuckDB para consultar os dados.")
 
-    uploads = st.file_uploader(
-        "Arquivos",
-        type=["csv", "xlsx", "xls", "parquet"],
-        accept_multiple_files=True,
-    )
+    uploads = st.file_uploader("Arquivos", type=["csv", "xlsx", "xls", "parquet"], accept_multiple_files=True)
 
     if st.button("Carregar arquivos", type="primary", disabled=not uploads):
         engine = SpreadsheetEngine()
@@ -98,21 +130,13 @@ def setup_dremio_ui():
     host = st.text_input("Host do Dremio", value=default_host, placeholder="https://dremio.empresa.com")
     pat = st.text_input("Personal Access Token", value=os.getenv("DREMIO_PAT", ""), type="password")
     is_cloud = st.checkbox("É Dremio Cloud?", value=False)
-    project_id = None
-    if is_cloud:
-        project_id = st.text_input("Project ID Dremio Cloud", value=os.getenv("DREMIO_PROJECT_ID", ""))
+    project_id = st.text_input("Project ID Dremio Cloud", value=os.getenv("DREMIO_PROJECT_ID", "")) if is_cloud else None
     paths_raw = st.text_input("Workspaces para listar", placeholder="Comercial,Financeiro")
 
     if st.button("Conectar Dremio", type="primary", disabled=not host or not pat):
         allowed = [p.strip() for p in paths_raw.split(",") if p.strip()] if paths_raw else None
         try:
-            engine = DremioEngine(
-                host=host,
-                pat=pat,
-                project_id=project_id,
-                is_cloud=is_cloud,
-                allowed_paths=allowed,
-            )
+            engine = DremioEngine(host=host, pat=pat, project_id=project_id, is_cloud=is_cloud, allowed_paths=allowed)
             tables = engine.list_tables()
             agent = create_agent(engine)
             if agent:
@@ -175,6 +199,8 @@ def render_chat():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    render_download_buttons()
+
     user_input = st.chat_input("Pergunte algo sobre os dados...")
     if not user_input:
         return
@@ -190,6 +216,7 @@ def render_chat():
             except Exception as exc:
                 response = f"Erro ao processar pergunta: {exc}"
             st.markdown(response)
+            render_download_buttons()
 
     st.session_state.messages.append({"role": "assistant", "content": response})
 
