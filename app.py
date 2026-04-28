@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from agent import Agent
 from dremio_engine import DremioEngine
+from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_upload_bucket
 from spreadsheet_engine import SpreadsheetEngine
 
 
@@ -23,6 +25,8 @@ def init_state():
         st.session_state.messages = []
     if "loaded_files" not in st.session_state:
         st.session_state.loaded_files = []
+    if "signed_upload" not in st.session_state:
+        st.session_state.signed_upload = None
 
 
 def get_vertex_config():
@@ -38,6 +42,14 @@ def create_agent(engine):
         st.error("Defina GOOGLE_CLOUD_PROJECT no ambiente antes de iniciar o agente.")
         return None
     return Agent(engine, model=model, project_id=project_id, location=location)
+
+
+def configure_engine_gcs(engine: SpreadsheetEngine):
+    hmac_id, hmac_secret = get_gcs_hmac_credentials()
+    if hmac_id and hmac_secret:
+        engine.configure_gcs(hmac_id, hmac_secret)
+    else:
+        engine.configure_gcs()
 
 
 def save_uploaded_file(uploaded_file) -> str:
@@ -87,20 +99,24 @@ def render_download_buttons():
         )
 
 
-def setup_spreadsheet_ui():
-    st.subheader("Modo Planilha")
-    st.caption("Carregue CSV, XLSX ou Parquet. O spike usa DuckDB para consultar os dados.")
+def start_spreadsheet_agent(engine: SpreadsheetEngine, loaded: list[str]):
+    agent = create_agent(engine)
+    if agent:
+        st.session_state.engine = engine
+        st.session_state.agent = agent
+        st.session_state.loaded_files = loaded
+        st.session_state.messages = []
+        st.success("Arquivos carregados e agente inicializado.")
+
+
+def setup_local_spreadsheet_upload():
+    st.markdown("#### Upload local")
+    st.caption("Indicado para arquivos pequenos. Em Cloud Run, prefira o upload via GCS para evitar limite de request.")
 
     uploads = st.file_uploader("Arquivos", type=["csv", "xlsx", "xls", "parquet"], accept_multiple_files=True)
 
-    if st.button("Carregar arquivos", type="primary", disabled=not uploads):
+    if st.button("Carregar arquivos locais", type="primary", disabled=not uploads):
         engine = SpreadsheetEngine()
-
-        hmac_id = os.getenv("GCS_HMAC_KEY_ID")
-        hmac_secret = os.getenv("GCS_HMAC_SECRET")
-        if hmac_id and hmac_secret:
-            engine.configure_gcs(hmac_id, hmac_secret)
-
         loaded = []
         for uploaded in uploads:
             path = save_uploaded_file(uploaded)
@@ -113,13 +129,108 @@ def setup_spreadsheet_ui():
                 st.error(f"Erro ao carregar {uploaded.name}: {exc}")
                 return
 
-        agent = create_agent(engine)
-        if agent:
-            st.session_state.engine = engine
-            st.session_state.agent = agent
-            st.session_state.loaded_files = loaded
-            st.session_state.messages = []
-            st.success("Arquivos carregados e agente inicializado.")
+        start_spreadsheet_agent(engine, loaded)
+
+
+def render_signed_upload_component(signed_url: str, content_type: str, gcs_uri: str):
+    components.html(
+        f"""
+        <div style="font-family: sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 12px;">
+          <p><strong>Upload direto para GCS</strong></p>
+          <input id="file" type="file" />
+          <button id="upload" style="margin-left: 8px;">Enviar para GCS</button>
+          <pre id="status" style="white-space: pre-wrap;"></pre>
+        </div>
+        <script>
+        const signedUrl = {signed_url!r};
+        const contentType = {content_type!r};
+        const gcsUri = {gcs_uri!r};
+        document.getElementById('upload').onclick = async () => {{
+          const file = document.getElementById('file').files[0];
+          const status = document.getElementById('status');
+          if (!file) {{
+            status.textContent = 'Selecione um arquivo primeiro.';
+            return;
+          }}
+          status.textContent = 'Enviando... não feche esta página.';
+          try {{
+            const response = await fetch(signedUrl, {{
+              method: 'PUT',
+              headers: {{ 'Content-Type': contentType }},
+              body: file
+            }});
+            if (!response.ok) {{
+              throw new Error(`HTTP ${{response.status}} ${{response.statusText}}`);
+            }}
+            status.textContent = `Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`;
+          }} catch (err) {{
+            status.textContent = `Falha no upload: ${{err.message}}`;
+          }}
+        }};
+        </script>
+        """,
+        height=180,
+    )
+
+
+def setup_gcs_spreadsheet_upload():
+    st.markdown("#### Upload grande via GCS")
+    st.caption("O arquivo vai direto do navegador para o bucket. O Streamlit recebe só o caminho gs:// para consulta.")
+
+    try:
+        bucket = get_upload_bucket()
+        st.caption(f"Bucket configurado: `{bucket}`")
+    except Exception as exc:
+        st.warning(f"Upload via GCS indisponível: {exc}")
+        return
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        filename = st.text_input("Nome do arquivo", placeholder="base_cobranca.parquet ou base_cobranca.csv")
+    with col2:
+        content_type = st.selectbox(
+            "Content-Type",
+            [
+                "application/octet-stream",
+                "text/csv",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/parquet",
+            ],
+        )
+
+    if st.button("Gerar signed URL", disabled=not filename):
+        try:
+            st.session_state.signed_upload = create_signed_upload_url(filename=filename, content_type=content_type)
+        except Exception as exc:
+            st.error(f"Falha ao gerar signed URL: {exc}")
+
+    signed_upload = st.session_state.get("signed_upload")
+    if signed_upload:
+        st.code(signed_upload.gcs_uri)
+        render_signed_upload_component(signed_upload.signed_url, content_type, signed_upload.gcs_uri)
+
+        table_name = Path(signed_upload.object_name).stem.lower().replace("-", "_").replace(" ", "_")
+        table_name = st.text_input("Nome da tabela no DuckDB", value=table_name)
+        if st.button("Usar arquivo enviado", type="primary"):
+            engine = SpreadsheetEngine()
+            try:
+                configure_engine_gcs(engine)
+                table = engine.load_file(signed_upload.gcs_uri, table_name)
+                info = engine.describe_table(table)
+                start_spreadsheet_agent(engine, [f"{info.full_path} — {info.row_count:,} linhas — {signed_upload.gcs_uri}"])
+            except Exception as exc:
+                st.error(f"Erro ao carregar arquivo do GCS: {exc}")
+
+
+def setup_spreadsheet_ui():
+    st.subheader("Modo Planilha")
+    st.caption("Use DuckDB para consultar CSV, XLSX ou Parquet. Para arquivos grandes, use GCS.")
+
+    tab_gcs, tab_local = st.tabs(["GCS / arquivo grande", "Upload local / dev"])
+    with tab_gcs:
+        setup_gcs_spreadsheet_upload()
+    with tab_local:
+        setup_local_spreadsheet_upload()
 
 
 def setup_dremio_ui():
@@ -159,7 +270,7 @@ def render_sidebar():
 
     with st.sidebar:
         st.title("Fin BigData")
-        st.caption("Spike GCP + Gemini + DuckDB/Dremio")
+        st.caption("Produto analítico: Cloud Run + Vertex AI + DuckDB/Dremio")
 
         st.markdown("### Vertex AI")
         st.write(f"Projeto: `{project_id or 'não definido'}`")
@@ -189,6 +300,7 @@ def render_sidebar():
             st.session_state.agent = None
             st.session_state.messages = []
             st.session_state.loaded_files = []
+            st.session_state.signed_upload = None
             st.rerun()
 
 
