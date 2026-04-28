@@ -1,0 +1,46 @@
+# Ambiente / segredos
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dados locais e outputs
+/data/
+/exports/
+/logs/
+/tmp/
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.duckdb
+*.db
+*.sqlite
+*.sqlite3
+
+# Google Cloud / credenciais locais
+application_default_credentials.json
+*.json.key
+service-account*.json
+
+# Build / dist
+build/
+dist/
+*.egg-info/
