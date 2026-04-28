@@ -36,6 +36,40 @@ class DremioEngine(AnalyticsEngine):
             return f"{self.host}/v0/projects/{self.project_id}/sql"
         return f"{self.host}/api/v3/sql"
 
+    def _sql_path_parts(self, path_parts: list[str]) -> list[str]:
+        """Normalize catalog path parts into a SQL path.
+
+        Dremio Cloud API calls are already scoped by project_id, but some catalog
+        responses include the Dremio project display name as the first path part.
+        That first segment is not valid in SQL. SQL paths should start at the
+        space/source level, for example:
+
+        API/catalog path: ["grupo-bild", "MODULAR", "MODULAR_VIEW", "VW_X"]
+        SQL path:         "MODULAR"."MODULAR_VIEW"."VW_X"
+        """
+        parts = list(path_parts)
+
+        if self.is_cloud and len(parts) > 1:
+            allowed = {p.strip().lower() for p in self.allowed_paths if p.strip()}
+            second = parts[1].strip().lower()
+
+            # If the user restricted catalog listing to a workspace/space and the
+            # second segment matches it, the first segment is the project display
+            # name and must be removed from SQL.
+            if allowed and second in allowed:
+                parts = parts[1:]
+
+            # Fallback for common Dremio Cloud catalog shape. Project display
+            # names frequently contain hyphen/space and appear before the SQL
+            # namespace. Keep this conservative to avoid stripping real spaces.
+            elif "-" in parts[0] or " " in parts[0]:
+                parts = parts[1:]
+
+        return parts
+
+    def _quote_sql_path(self, path_parts: list[str]) -> str:
+        return ".".join(f'"{p}"' for p in self._sql_path_parts(path_parts))
+
     def list_tables(self) -> list[TableInfo]:
         tables = []
         if not self.allowed_paths:
@@ -66,7 +100,7 @@ class DremioEngine(AnalyticsEngine):
             if ctype == "DATASET":
                 tables.append(TableInfo(
                     name=child["path"][-1],
-                    full_path=".".join(f'"{p}"' for p in child["path"]),
+                    full_path=self._quote_sql_path(child["path"]),
                     columns=[],
                     description=child.get("datasetType", ""),
                 ))
@@ -132,7 +166,8 @@ class DremioEngine(AnalyticsEngine):
         return (
             "Dremio SQL (Apache Calcite, ANSI SQL). "
             "Funções de data: DATE_TRUNC, EXTRACT, DATE_ADD/SUB. "
-            "Importante: nomes de tabelas devem vir entre aspas duplas: "
-            '"workspace"."folder"."view_name". '
+            "Importante: em Dremio Cloud, o project_id é usado na API, "
+            "mas NÃO entra no caminho SQL. Use paths como "
+            '"SPACE"."FOLDER"."VIEW_NAME". '
             "Suporta CTEs, window functions, regex, JSON functions."
         )
