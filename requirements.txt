@@ -5,3 +5,4 @@ requests
 polars
 streamlit
 openpyxl
+pandas
