@@ -145,6 +145,16 @@ class DremioEngine(AnalyticsEngine):
     def _quote_sql_path(self, path_parts: list[str]) -> str:
         return ".".join(f'"{p}"' for p in self._sql_path_parts(path_parts))
 
+    def _table_info_from_path(self, path: str, path_parts: list[str]) -> TableInfo:
+        sql_path = path if '"' in path else self._quote_sql_path(path_parts)
+        clean_name = self._clean_path_parts(path)[-1] if self._clean_path_parts(path) else sql_path
+        return TableInfo(
+            name=clean_name,
+            full_path=sql_path,
+            columns=[],
+            description="Dataset selecionado no Dremio",
+        )
+
     def list_tables(self) -> list[TableInfo]:
         tables = []
         if not self.allowed_paths:
@@ -154,7 +164,16 @@ class DremioEngine(AnalyticsEngine):
         else:
             for path in self.allowed_paths:
                 resolved = self._resolve_allowed_path(path)
-                tables.extend(self._list_path(resolved))
+                listed = self._list_path(resolved)
+                if listed:
+                    tables.extend(listed)
+                    continue
+
+                # When the UI passes a final selected view/dataset, there are no
+                # child nodes to list. In that case list_tables must expose the
+                # selected dataset itself so the agent can describe/sample/query it.
+                if len(self._clean_path_parts(path)) >= 3 or len(resolved) >= 3:
+                    tables.append(self._table_info_from_path(path, resolved))
         return tables
 
     def _list_path(self, path_parts: list[str]) -> list[TableInfo]:
@@ -165,6 +184,16 @@ class DremioEngine(AnalyticsEngine):
             return []
 
         tables = []
+        dataset_type = data.get("datasetType")
+        if dataset_type and (data.get("path") or path_parts):
+            dataset_path = data.get("path") or path_parts
+            return [TableInfo(
+                name=dataset_path[-1],
+                full_path=self._quote_sql_path(dataset_path),
+                columns=[],
+                description=dataset_type or "Dataset do Dremio",
+            )]
+
         for child in data.get("children", []):
             ctype = child.get("type") or child.get("containerType") or child.get("entityType")
             dataset_type = child.get("datasetType")
