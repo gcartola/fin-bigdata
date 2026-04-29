@@ -526,12 +526,9 @@ def render_chat():
 
     with st.chat_message("assistant"):
         status_box = st.empty()
-        status_lines = []
 
         def update_status(message: str):
-            status_lines.append(message)
-            visible = status_lines[-8:]
-            status_box.info("\n".join(f"- {line}" for line in visible))
+            status_box.caption(message)
 
         update_status("🚀 Iniciando análise")
         try:
