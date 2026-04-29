@@ -24,16 +24,22 @@ st.set_page_config(page_title="Fin BigData", page_icon="📊", layout="wide")
 
 
 def init_state():
-    if "engine" not in st.session_state:
-        st.session_state.engine = None
-    if "agent" not in st.session_state:
-        st.session_state.agent = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "loaded_files" not in st.session_state:
-        st.session_state.loaded_files = []
-    if "signed_upload" not in st.session_state:
-        st.session_state.signed_upload = None
+    defaults = {
+        "engine": None,
+        "agent": None,
+        "messages": [],
+        "loaded_files": [],
+        "signed_upload": None,
+        "dremio_catalogs": [],
+        "dremio_containers": [],
+        "dremio_views": [],
+        "dremio_selected_catalog": None,
+        "dremio_selected_container": None,
+        "dremio_selected_view": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
 def get_vertex_config():
@@ -231,16 +237,22 @@ def setup_spreadsheet_ui():
         setup_local_spreadsheet_upload()
 
 
+def _create_dremio_engine(pat: str) -> DremioEngine:
+    return DremioEngine(
+        host=DREMIO_CLOUD_HOST,
+        pat=pat,
+        project_id=DREMIO_CLOUD_PROJECT_ID,
+        is_cloud=True,
+        allowed_paths=[],
+    )
+
+
 def setup_dremio_ui():
     st.subheader("Modo Dremio")
-    st.caption("Ambiente Dremio Cloud padrão do grupo. Informe apenas seu PAT e o workspace.")
+    st.caption("Escolha catálogo, pasta e view sem digitar caminho técnico.")
 
-    host = DREMIO_CLOUD_HOST
-    project_id = DREMIO_CLOUD_PROJECT_ID
-    is_cloud = True
-
-    st.text_input("Host do Dremio", value=host, disabled=True)
-    st.text_input("Project ID Dremio Cloud", value=project_id, disabled=True)
+    st.text_input("Host do Dremio", value=DREMIO_CLOUD_HOST, disabled=True)
+    st.text_input("Project ID Dremio Cloud", value=DREMIO_CLOUD_PROJECT_ID, disabled=True)
 
     server_pat = os.getenv("DREMIO_PAT", "").strip()
     use_server_pat = False
@@ -257,18 +269,96 @@ def setup_dremio_ui():
         )
     effective_pat = server_pat if use_server_pat else pat
 
-    paths_raw = st.text_input("Workspace/Catálogo", value="MODULAR", placeholder="Ex: MODULAR, FINANCEIRO, ERP_ORACLE")
-
-    if st.button("Conectar Dremio", type="primary", disabled=not effective_pat):
-        allowed = [p.strip() for p in paths_raw.split(",") if p.strip()] if paths_raw else None
+    if st.button("Buscar catálogos", disabled=not effective_pat):
         try:
-            engine = DremioEngine(host=host, pat=effective_pat, project_id=project_id, is_cloud=is_cloud, allowed_paths=allowed)
+            engine = _create_dremio_engine(effective_pat)
+            st.session_state.dremio_catalogs = engine.list_catalogs()
+            st.session_state.dremio_containers = []
+            st.session_state.dremio_views = []
+            st.session_state.dremio_selected_catalog = None
+            st.session_state.dremio_selected_container = None
+            st.session_state.dremio_selected_view = None
+            if not st.session_state.dremio_catalogs:
+                st.warning("Nenhum catálogo visível para este PAT.")
+        except Exception as exc:
+            st.error(f"Falha ao buscar catálogos: {exc}")
+
+    catalogs = st.session_state.get("dremio_catalogs", [])
+    selected_catalog = None
+    if catalogs:
+        selected_catalog = st.selectbox("Catálogo/Workspace", catalogs, key="dremio_catalog_select")
+        if selected_catalog != st.session_state.get("dremio_selected_catalog"):
+            st.session_state.dremio_selected_catalog = selected_catalog
+            st.session_state.dremio_containers = []
+            st.session_state.dremio_views = []
+            st.session_state.dremio_selected_container = None
+            st.session_state.dremio_selected_view = None
+
+        if st.button("Listar pastas e views", disabled=not effective_pat or not selected_catalog):
+            try:
+                engine = _create_dremio_engine(effective_pat)
+                st.session_state.dremio_containers = engine.list_child_containers(selected_catalog)
+                st.session_state.dremio_views = engine.list_datasets(selected_catalog, recursive=False)
+                if not st.session_state.dremio_containers and not st.session_state.dremio_views:
+                    st.warning("Não encontrei pastas ou views nesse catálogo.")
+            except Exception as exc:
+                st.error(f"Falha ao listar catálogo: {exc}")
+
+    containers = st.session_state.get("dremio_containers", [])
+    selected_container = None
+    if containers:
+        selected_container = st.selectbox("Pasta", ["(usar catálogo inteiro)"] + containers, key="dremio_container_select")
+        if selected_container == "(usar catálogo inteiro)":
+            selected_container = selected_catalog
+        if selected_container != st.session_state.get("dremio_selected_container"):
+            st.session_state.dremio_selected_container = selected_container
+            st.session_state.dremio_views = []
+            st.session_state.dremio_selected_view = None
+
+        if st.button("Listar views", disabled=not effective_pat or not selected_container):
+            try:
+                engine = _create_dremio_engine(effective_pat)
+                st.session_state.dremio_views = engine.list_datasets(selected_container, recursive=True)
+                if not st.session_state.dremio_views:
+                    st.warning("Não encontrei views nessa pasta.")
+            except Exception as exc:
+                st.error(f"Falha ao listar views: {exc}")
+
+    views = st.session_state.get("dremio_views", [])
+    selected_view = None
+    if views:
+        view_options = ["(usar todas as views listadas)"] + [view.full_path for view in views]
+        selected_view = st.selectbox("View", view_options, key="dremio_view_select")
+        if selected_view == "(usar todas as views listadas)":
+            selected_view = None
+        st.caption(f"{len(views)} view(s) encontrada(s).")
+
+    if st.button("Conectar Dremio", type="primary", disabled=not effective_pat or not (selected_catalog or selected_view)):
+        try:
+            if selected_view:
+                allowed = [selected_view]
+                loaded_label = f"View selecionada: {selected_view}"
+            elif views:
+                allowed = [view.full_path for view in views]
+                loaded_label = f"{len(views)} views selecionadas"
+            else:
+                path = st.session_state.get("dremio_selected_container") or selected_catalog
+                allowed = [path] if path else []
+                loaded_label = f"Catálogo selecionado: {path}"
+
+            engine = DremioEngine(
+                host=DREMIO_CLOUD_HOST,
+                pat=effective_pat,
+                project_id=DREMIO_CLOUD_PROJECT_ID,
+                is_cloud=True,
+                allowed_paths=allowed,
+            )
             tables = engine.list_tables()
             agent = create_agent(engine)
             if agent:
                 st.session_state.engine = engine
                 st.session_state.agent = agent
-                st.session_state.loaded_files = [f"{len(tables)} tabelas visíveis no Dremio"]
+                st.session_state.loaded_files = [loaded_label, f"{len(tables)} tabelas/views visíveis no Dremio"]
                 st.session_state.messages = []
                 st.success("Dremio conectado e agente inicializado.")
         except Exception as exc:
@@ -311,6 +401,9 @@ def render_sidebar():
             st.session_state.messages = []
             st.session_state.loaded_files = []
             st.session_state.signed_upload = None
+            st.session_state.dremio_catalogs = []
+            st.session_state.dremio_containers = []
+            st.session_state.dremio_views = []
             st.rerun()
 
 
