@@ -10,6 +10,7 @@ import streamlit.components.v1 as components
 from agent import Agent
 from dremio_engine import DremioEngine
 from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_upload_bucket
+from hybrid_engine import HybridEngine
 from spreadsheet_engine import SpreadsheetEngine
 
 
@@ -30,6 +31,10 @@ def init_state():
         "messages": [],
         "loaded_files": [],
         "signed_upload": None,
+        "dremio_engine": None,
+        "spreadsheet_engine": None,
+        "dremio_loaded_files": [],
+        "spreadsheet_loaded_files": [],
         "dremio_catalogs": [],
         "dremio_containers": [],
         "dremio_views": [],
@@ -55,6 +60,16 @@ def create_agent(engine):
         st.error("Defina GOOGLE_CLOUD_PROJECT no ambiente antes de iniciar o agente.")
         return None
     return Agent(engine, model=model, project_id=project_id, location=location)
+
+
+def activate_engine(engine, loaded: list[str], success_message: str):
+    agent = create_agent(engine)
+    if agent:
+        st.session_state.engine = engine
+        st.session_state.agent = agent
+        st.session_state.loaded_files = loaded
+        st.session_state.messages = []
+        st.success(success_message)
 
 
 def configure_engine_gcs(engine: SpreadsheetEngine):
@@ -117,13 +132,9 @@ def render_download_buttons():
 
 
 def start_spreadsheet_agent(engine: SpreadsheetEngine, loaded: list[str]):
-    agent = create_agent(engine)
-    if agent:
-        st.session_state.engine = engine
-        st.session_state.agent = agent
-        st.session_state.loaded_files = loaded
-        st.session_state.messages = []
-        st.success("Arquivos carregados e agente inicializado.")
+    st.session_state.spreadsheet_engine = engine
+    st.session_state.spreadsheet_loaded_files = loaded
+    activate_engine(engine, loaded, "Planilha carregada e agente inicializado.")
 
 
 def setup_local_spreadsheet_upload():
@@ -407,22 +418,44 @@ def setup_dremio_ui():
                 allowed_paths=allowed,
             )
             tables = engine.list_tables()
-            agent = create_agent(engine)
-            if agent:
-                st.session_state.engine = engine
-                st.session_state.agent = agent
-                st.session_state.loaded_files = [loaded_label, f"{len(tables)} tabelas/views visíveis no Dremio"]
-                st.session_state.messages = []
-                st.success("Dremio conectado e agente inicializado.")
+            loaded = [loaded_label, f"{len(tables)} tabelas/views visíveis no Dremio"]
+            st.session_state.dremio_engine = engine
+            st.session_state.dremio_loaded_files = loaded
+            activate_engine(engine, loaded, "Dremio conectado e agente inicializado.")
         except Exception as exc:
             st.error(f"Falha ao conectar no Dremio: {exc}")
 
 
 def render_relationship_ui():
     st.markdown("### Relacionamento")
-    st.caption("Combine Dremio e Planilha para cruzar dados entre fontes.")
-    st.button("🔗 Criar relacionamento entre fontes", disabled=True, use_container_width=True)
-    st.caption("Em breve no MVP misto.")
+    st.caption("Combine Dremio e Planilha para cruzar dados entre fontes no chat.")
+
+    has_dremio = st.session_state.get("dremio_engine") is not None
+    has_spreadsheet = st.session_state.get("spreadsheet_engine") is not None
+
+    if not has_dremio or not has_spreadsheet:
+        st.button("🔗 Criar relacionamento entre fontes", disabled=True, use_container_width=True)
+        missing = []
+        if not has_dremio:
+            missing.append("Dremio")
+        if not has_spreadsheet:
+            missing.append("Planilha")
+        st.caption(f"Conecte {' e '.join(missing)} para ativar a análise combinada.")
+        return
+
+    if st.button("🔗 Ativar análise combinada", type="primary", use_container_width=True):
+        hybrid = HybridEngine(
+            dremio_engine=st.session_state.dremio_engine,
+            spreadsheet_engine=st.session_state.spreadsheet_engine,
+        )
+        loaded = [
+            "Modo combinado ativo: Dremio + Planilha",
+            *st.session_state.get("dremio_loaded_files", []),
+            *st.session_state.get("spreadsheet_loaded_files", []),
+        ]
+        activate_engine(hybrid, loaded, "Análise combinada ativada. Oriente o agente pelo chat sobre como relacionar as fontes.")
+
+    st.caption("Exemplo: busque um contrato no Dremio; com nome/CPF encontrados, procure o cliente na planilha.")
 
 
 def render_sidebar():
@@ -459,6 +492,10 @@ def render_sidebar():
             st.session_state.messages = []
             st.session_state.loaded_files = []
             st.session_state.signed_upload = None
+            st.session_state.dremio_engine = None
+            st.session_state.spreadsheet_engine = None
+            st.session_state.dremio_loaded_files = []
+            st.session_state.spreadsheet_loaded_files = []
             st.session_state.dremio_catalogs = []
             st.session_state.dremio_containers = []
             st.session_state.dremio_views = []
