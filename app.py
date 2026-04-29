@@ -526,13 +526,24 @@ def render_chat():
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Consultando dados e pensando..."):
-            try:
-                response = st.session_state.agent.chat(user_input)
-            except Exception as exc:
-                response = f"Erro ao processar pergunta: {exc}"
-            st.markdown(response)
-            render_download_buttons()
+        status_box = st.empty()
+        status_lines = []
+
+        def update_status(message: str):
+            status_lines.append(message)
+            visible = status_lines[-8:]
+            status_box.info("\n".join(f"- {line}" for line in visible))
+
+        update_status("🚀 Iniciando análise")
+        try:
+            response = st.session_state.agent.chat(user_input, progress_callback=update_status)
+        except Exception as exc:
+            response = f"Erro ao processar pergunta: {exc}"
+            update_status("❌ Erro ao processar pergunta")
+
+        status_box.empty()
+        st.markdown(response)
+        render_download_buttons()
 
     st.session_state.messages.append({"role": "assistant", "content": response})
 
