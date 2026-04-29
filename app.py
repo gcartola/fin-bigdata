@@ -249,10 +249,7 @@ def _create_dremio_engine(pat: str) -> DremioEngine:
 
 def setup_dremio_ui():
     st.subheader("Modo Dremio")
-    st.caption("Escolha catálogo, pasta e view sem digitar caminho técnico.")
-
-    st.text_input("API do Dremio", value=DREMIO_CLOUD_HOST, disabled=True)
-    st.text_input("Project ID Dremio Cloud", value=DREMIO_CLOUD_PROJECT_ID, disabled=True)
+    st.caption("Informe seu PAT e escolha catálogo, pasta e view.")
 
     server_pat = os.getenv("DREMIO_PAT", "").strip()
     use_server_pat = False
