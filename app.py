@@ -227,7 +227,7 @@ def setup_gcs_spreadsheet_upload():
 
 
 def setup_spreadsheet_ui():
-    st.subheader("Modo Planilha")
+    st.subheader("Fonte Planilha")
     st.caption("Use DuckDB para consultar CSV, XLSX ou Parquet. Para arquivos grandes, use GCS.")
 
     tab_gcs, tab_local = st.tabs(["GCS / arquivo grande", "Upload local / dev"])
@@ -248,7 +248,7 @@ def _create_dremio_engine(pat: str) -> DremioEngine:
 
 
 def setup_dremio_ui():
-    st.subheader("Modo Dremio")
+    st.subheader("Fonte Dremio")
     st.caption("Informe seu PAT e escolha catálogo, pasta e view.")
 
     server_pat = os.getenv("DREMIO_PAT", "").strip()
@@ -362,26 +362,31 @@ def setup_dremio_ui():
             st.error(f"Falha ao conectar no Dremio: {exc}")
 
 
+def render_relationship_ui():
+    st.markdown("### Relacionamento")
+    st.caption("Combine Dremio e Planilha para cruzar dados entre fontes.")
+    st.button("🔗 Criar relacionamento entre fontes", disabled=True, use_container_width=True)
+    st.caption("Em breve no MVP misto.")
+
+
 def render_sidebar():
-    project_id, location, model = get_vertex_config()
+    _, _, model = get_vertex_config()
 
     with st.sidebar:
         st.title("Fin BigData")
-        st.caption("Produto analítico: Cloud Run + Vertex AI + DuckDB/Dremio")
+        st.caption("Análises de BigData")
 
-        st.markdown("### Vertex AI")
-        st.write(f"Projeto: `{project_id or 'não definido'}`")
-        st.write(f"Região: `{location}`")
+        st.markdown("### Agente")
         st.write(f"Modelo: `{model}`")
 
-        st.markdown("### Fonte de dados")
-        mode = st.radio("Modo", ["Dremio", "Planilha"], horizontal=True)
+        st.divider()
+        setup_dremio_ui()
 
         st.divider()
-        if mode == "Planilha":
-            setup_spreadsheet_ui()
-        else:
-            setup_dremio_ui()
+        setup_spreadsheet_ui()
+
+        st.divider()
+        render_relationship_ui()
 
         st.divider()
         st.markdown("### Estado")
