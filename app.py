@@ -515,10 +515,9 @@ def render_chat():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    render_download_buttons()
-
     user_input = st.chat_input("Pergunte algo sobre os dados...")
     if not user_input:
+        render_download_buttons()
         return
 
     st.session_state.messages.append({"role": "user", "content": user_input})
