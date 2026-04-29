@@ -13,6 +13,13 @@ from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_u
 from spreadsheet_engine import SpreadsheetEngine
 
 
+DREMIO_CLOUD_HOST = os.getenv("DREMIO_HOST", "https://app.dremio.cloud").strip()
+DREMIO_CLOUD_PROJECT_ID = os.getenv(
+    "DREMIO_PROJECT_ID",
+    "e2f7d480-9c76-49c0-86e5-18555dd15571",
+).strip()
+
+
 st.set_page_config(page_title="Fin BigData", page_icon="📊", layout="wide")
 
 
@@ -76,6 +83,8 @@ def render_download_buttons():
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="resultado")
 
+    unique_key = f"{len(st.session_state.messages)}_{result.row_count}_{abs(hash(result.sql_executed or ''))}"
+
     st.divider()
     st.caption(f"Resultado disponível para download: {len(df):,} linhas")
     col1, col2 = st.columns(2)
@@ -87,6 +96,7 @@ def render_download_buttons():
             file_name="resultado_fin_bigdata.csv",
             mime="text/csv",
             use_container_width=True,
+            key=f"download_csv_{unique_key}",
         )
 
     with col2:
@@ -96,6 +106,7 @@ def render_download_buttons():
             file_name="resultado_fin_bigdata.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+            key=f"download_excel_{unique_key}",
         )
 
 
@@ -222,10 +233,15 @@ def setup_spreadsheet_ui():
 
 def setup_dremio_ui():
     st.subheader("Modo Dremio")
-    st.caption("Use PAT individual ou um PAT de serviço vindo do Secret Manager.")
+    st.caption("Ambiente Dremio Cloud padrão do grupo. Informe apenas seu PAT e o workspace.")
 
-    default_host = os.getenv("DREMIO_HOST", "")
-    host = st.text_input("Host do Dremio", value=default_host, placeholder="https://dremio.empresa.com")
+    host = DREMIO_CLOUD_HOST
+    project_id = DREMIO_CLOUD_PROJECT_ID
+    is_cloud = True
+
+    st.text_input("Host do Dremio", value=host, disabled=True)
+    st.text_input("Project ID Dremio Cloud", value=project_id, disabled=True)
+
     server_pat = os.getenv("DREMIO_PAT", "").strip()
     use_server_pat = False
     if server_pat:
@@ -241,11 +257,9 @@ def setup_dremio_ui():
         )
     effective_pat = server_pat if use_server_pat else pat
 
-    is_cloud = st.checkbox("É Dremio Cloud?", value=False)
-    project_id = st.text_input("Project ID Dremio Cloud", value=os.getenv("DREMIO_PROJECT_ID", "")) if is_cloud else None
-    paths_raw = st.text_input("Workspaces para listar", placeholder="Comercial,Financeiro")
+    paths_raw = st.text_input("Workspace/Catálogo", value="MODULAR", placeholder="Ex: MODULAR, FINANCEIRO, ERP_ORACLE")
 
-    if st.button("Conectar Dremio", type="primary", disabled=not host or not effective_pat):
+    if st.button("Conectar Dremio", type="primary", disabled=not effective_pat):
         allowed = [p.strip() for p in paths_raw.split(",") if p.strip()] if paths_raw else None
         try:
             engine = DremioEngine(host=host, pat=effective_pat, project_id=project_id, is_cloud=is_cloud, allowed_paths=allowed)
