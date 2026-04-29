@@ -36,6 +36,17 @@ class DremioEngine(AnalyticsEngine):
             return f"{self.host}/v0/projects/{self.project_id}/sql"
         return f"{self.host}/api/v3/sql"
 
+    def list_catalogs(self) -> list[str]:
+        resp = self.session.get(self._api_url("catalog"))
+        resp.raise_for_status()
+        catalogs = []
+        for item in resp.json().get("data", []):
+            if item.get("containerType") in ("SPACE", "SOURCE", "FOLDER"):
+                path = item.get("path") or []
+                if path:
+                    catalogs.append(".".join(path))
+        return sorted(set(catalogs))
+
     def _sql_path_parts(self, path_parts: list[str]) -> list[str]:
         """Normalize catalog path parts into a SQL path.
 
@@ -53,15 +64,8 @@ class DremioEngine(AnalyticsEngine):
             allowed = {p.strip().lower() for p in self.allowed_paths if p.strip()}
             second = parts[1].strip().lower()
 
-            # If the user restricted catalog listing to a workspace/space and the
-            # second segment matches it, the first segment is the project display
-            # name and must be removed from SQL.
             if allowed and second in allowed:
                 parts = parts[1:]
-
-            # Fallback for common Dremio Cloud catalog shape. Project display
-            # names frequently contain hyphen/space and appear before the SQL
-            # namespace. Keep this conservative to avoid stripping real spaces.
             elif "-" in parts[0] or " " in parts[0]:
                 parts = parts[1:]
 
