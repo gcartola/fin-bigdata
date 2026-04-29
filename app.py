@@ -132,7 +132,7 @@ def setup_local_spreadsheet_upload():
         start_spreadsheet_agent(engine, loaded)
 
 
-def render_signed_upload_component(signed_url: str, content_type: str, gcs_uri: str):
+def render_signed_upload_component(signed_url: str, gcs_uri: str):
     components.html(
         f"""
         <div style="font-family: sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 12px;">
@@ -143,7 +143,6 @@ def render_signed_upload_component(signed_url: str, content_type: str, gcs_uri: 
         </div>
         <script>
         const signedUrl = {signed_url!r};
-        const contentType = {content_type!r};
         const gcsUri = {gcs_uri!r};
         document.getElementById('upload').onclick = async () => {{
           const file = document.getElementById('file').files[0];
@@ -156,11 +155,11 @@ def render_signed_upload_component(signed_url: str, content_type: str, gcs_uri: 
           try {{
             const response = await fetch(signedUrl, {{
               method: 'PUT',
-              headers: {{ 'Content-Type': contentType }},
               body: file
             }});
+            const detail = await response.text();
             if (!response.ok) {{
-              throw new Error(`HTTP ${{response.status}} ${{response.statusText}}`);
+              throw new Error(`HTTP ${{response.status}} ${{response.statusText}} ${{detail}}`);
             }}
             status.textContent = `Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`;
           }} catch (err) {{
@@ -169,7 +168,7 @@ def render_signed_upload_component(signed_url: str, content_type: str, gcs_uri: 
         }};
         </script>
         """,
-        height=180,
+        height=220,
     )
 
 
@@ -184,30 +183,18 @@ def setup_gcs_spreadsheet_upload():
         st.warning(f"Upload via GCS indisponível: {exc}")
         return
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        filename = st.text_input("Nome do arquivo", placeholder="base_cobranca.parquet ou base_cobranca.csv")
-    with col2:
-        content_type = st.selectbox(
-            "Content-Type",
-            [
-                "application/octet-stream",
-                "text/csv",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/parquet",
-            ],
-        )
+    filename = st.text_input("Nome do arquivo", placeholder="base_cobranca.xlsx, base_cobranca.csv ou base_cobranca.parquet")
 
     if st.button("Gerar signed URL", disabled=not filename):
         try:
-            st.session_state.signed_upload = create_signed_upload_url(filename=filename, content_type=content_type)
+            st.session_state.signed_upload = create_signed_upload_url(filename=filename)
         except Exception as exc:
             st.error(f"Falha ao gerar signed URL: {exc}")
 
     signed_upload = st.session_state.get("signed_upload")
     if signed_upload:
         st.code(signed_upload.gcs_uri)
-        render_signed_upload_component(signed_upload.signed_url, content_type, signed_upload.gcs_uri)
+        render_signed_upload_component(signed_upload.signed_url, signed_upload.gcs_uri)
 
         table_name = Path(signed_upload.object_name).stem.lower().replace("-", "_").replace(" ", "_")
         table_name = st.text_input("Nome da tabela no DuckDB", value=table_name)
