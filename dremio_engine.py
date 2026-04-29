@@ -51,16 +51,18 @@ class DremioEngine(AnalyticsEngine):
                 parts.append(value)
         return parts
 
-    def list_catalogs(self) -> list[str]:
+    def _get_catalog_root_items(self) -> list[dict]:
         resp = self.session.get(self._api_url("catalog"))
         resp.raise_for_status()
+        return resp.json().get("data", [])
+
+    def list_catalogs(self) -> list[str]:
         catalogs = []
-        for item in resp.json().get("data", []):
+        for item in self._get_catalog_root_items():
             if item.get("containerType") in ("SPACE", "SOURCE", "FOLDER"):
                 path = item.get("path") or []
                 if path:
                     catalogs.append(".".join(path))
-                    catalogs.append(path[-1])
         return sorted(set(catalogs), key=str.lower)
 
     def _resolve_allowed_path(self, user_path: str) -> list[str]:
@@ -69,9 +71,7 @@ class DremioEngine(AnalyticsEngine):
         requested_lower = requested.lower()
 
         try:
-            resp = self.session.get(self._api_url("catalog"))
-            resp.raise_for_status()
-            for item in resp.json().get("data", []):
+            for item in self._get_catalog_root_items():
                 path = item.get("path") or []
                 if not path:
                     continue
@@ -83,6 +83,50 @@ class DremioEngine(AnalyticsEngine):
             print(f"Aviso: não consegui resolver catálogo '{user_path}': {e}")
 
         return requested_parts
+
+    def _get_catalog_by_path(self, path_parts: list[str]) -> dict:
+        clean_parts = [p.strip().strip('"').strip("'").strip() for p in path_parts if p]
+        path_encoded = "/".join(quote(p, safe="") for p in clean_parts)
+        url = self._api_url(f"catalog/by-path/{path_encoded}")
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_catalog_items(self, path: str) -> list[dict]:
+        path_parts = self._resolve_allowed_path(path)
+        data = self._get_catalog_by_path(path_parts)
+        items = []
+        for child in data.get("children", []):
+            child_path = child.get("path") or []
+            if not child_path:
+                continue
+            ctype = child.get("type") or child.get("containerType") or child.get("entityType")
+            dataset_type = child.get("datasetType")
+            is_dataset = ctype == "DATASET" or bool(dataset_type)
+            items.append({
+                "name": child_path[-1],
+                "path": ".".join(child_path),
+                "sql_path": self._quote_sql_path(child_path),
+                "type": "DATASET" if is_dataset else "CONTAINER",
+                "description": dataset_type or ctype or "",
+            })
+        return sorted(items, key=lambda item: (item["type"], item["name"].lower()))
+
+    def list_child_containers(self, path: str) -> list[str]:
+        return [item["path"] for item in self.list_catalog_items(path) if item["type"] == "CONTAINER"]
+
+    def list_datasets(self, path: str, recursive: bool = True) -> list[TableInfo]:
+        path_parts = self._resolve_allowed_path(path)
+        return self._list_path(path_parts) if recursive else [
+            TableInfo(
+                name=item["name"],
+                full_path=item["sql_path"],
+                columns=[],
+                description=item["description"],
+            )
+            for item in self.list_catalog_items(path)
+            if item["type"] == "DATASET"
+        ]
 
     def _sql_path_parts(self, path_parts: list[str]) -> list[str]:
         parts = [p.strip().strip('"').strip("'").strip() for p in path_parts if p]
@@ -104,9 +148,7 @@ class DremioEngine(AnalyticsEngine):
     def list_tables(self) -> list[TableInfo]:
         tables = []
         if not self.allowed_paths:
-            resp = self.session.get(self._api_url("catalog"))
-            resp.raise_for_status()
-            for item in resp.json().get("data", []):
+            for item in self._get_catalog_root_items():
                 if item.get("containerType") in ("SPACE", "SOURCE", "FOLDER"):
                     tables.extend(self._list_path(item["path"]))
         else:
@@ -116,15 +158,10 @@ class DremioEngine(AnalyticsEngine):
         return tables
 
     def _list_path(self, path_parts: list[str]) -> list[TableInfo]:
-        clean_parts = [p.strip().strip('"').strip("'").strip() for p in path_parts if p]
-        path_encoded = "/".join(quote(p, safe="") for p in clean_parts)
-        url = self._api_url(f"catalog/by-path/{path_encoded}")
         try:
-            resp = self.session.get(url)
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._get_catalog_by_path(path_parts)
         except Exception as e:
-            print(f"Aviso: não consegui listar {clean_parts}: {e}")
+            print(f"Aviso: não consegui listar {path_parts}: {e}")
             return []
 
         tables = []
