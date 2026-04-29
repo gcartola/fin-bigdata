@@ -13,7 +13,7 @@ from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_u
 from spreadsheet_engine import SpreadsheetEngine
 
 
-DREMIO_CLOUD_HOST = os.getenv("DREMIO_HOST", "https://app.dremio.cloud").strip()
+DREMIO_CLOUD_HOST = os.getenv("DREMIO_HOST", "https://api.dremio.cloud").strip()
 DREMIO_CLOUD_PROJECT_ID = os.getenv(
     "DREMIO_PROJECT_ID",
     "e2f7d480-9c76-49c0-86e5-18555dd15571",
@@ -251,7 +251,7 @@ def setup_dremio_ui():
     st.subheader("Modo Dremio")
     st.caption("Escolha catálogo, pasta e view sem digitar caminho técnico.")
 
-    st.text_input("Host do Dremio", value=DREMIO_CLOUD_HOST, disabled=True)
+    st.text_input("API do Dremio", value=DREMIO_CLOUD_HOST, disabled=True)
     st.text_input("Project ID Dremio Cloud", value=DREMIO_CLOUD_PROJECT_ID, disabled=True)
 
     server_pat = os.getenv("DREMIO_PAT", "").strip()
