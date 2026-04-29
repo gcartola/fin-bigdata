@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 
 from google import genai
 from google.genai import types
@@ -123,6 +124,19 @@ class Agent:
         self.conversation: list[types.Content] = []
         self.last_query_result = None
 
+    def _tool_label(self, name: str, args: dict) -> str:
+        if name == "list_tables":
+            return "Listando tabelas/views disponíveis"
+        if name == "describe_table":
+            return f"Lendo estrutura de `{args.get('table_name', '')}`"
+        if name == "sample_rows":
+            return f"Buscando amostra de `{args.get('table_name', '')}`"
+        if name == "run_sql":
+            query = (args.get("query") or "").replace("\n", " ").strip()
+            preview = query[:180] + ("..." if len(query) > 180 else "")
+            return f"Executando SQL: `{preview}`"
+        return f"Executando ferramenta `{name}`"
+
     def _execute_tool(self, name: str, args: dict) -> str:
         try:
             if name == "list_tables":
@@ -162,11 +176,17 @@ class Agent:
         except Exception as e:
             return f"ERRO: {e}"
 
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str, progress_callback: Callable[[str], None] | None = None) -> str:
+        def emit(message: str):
+            print(f"  [status] {message}")
+            if progress_callback:
+                progress_callback(message)
+
         self.conversation.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
         max_iterations = 15
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
+            emit(f"🧠 Pensando com o modelo ({iteration + 1}/{max_iterations})")
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=self.conversation,
@@ -184,18 +204,26 @@ class Agent:
                 for part in content.parts:
                     if part.text:
                         final_text += part.text
+                emit("✅ Resposta final pronta")
                 return final_text or "[Sem resposta de texto]"
 
             function_response_parts = []
             for fc in function_calls:
                 args = dict(fc.args) if fc.args else {}
-                preview = json.dumps(args, ensure_ascii=False)[:80]
+                preview = json.dumps(args, ensure_ascii=False)[:160]
+                tool_label = self._tool_label(fc.name, args)
                 print(f"  [tool] {fc.name}({preview})")
+                emit(f"🔧 {tool_label}")
                 result_str = self._execute_tool(fc.name, args)
+                if result_str.startswith("ERRO:"):
+                    emit(f"⚠️ {fc.name} retornou erro; tentando corrigir")
+                else:
+                    emit(f"✅ {fc.name} concluído")
                 function_response_parts.append(
                     types.Part(function_response=types.FunctionResponse(name=fc.name, response={"result": result_str}))
                 )
 
             self.conversation.append(types.Content(role="user", parts=function_response_parts))
 
+        emit("⚠️ Limite de iterações atingido")
         return "[Limite de iterações atingido sem resposta final]"
