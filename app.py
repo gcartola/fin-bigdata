@@ -247,6 +247,36 @@ def _create_dremio_engine(pat: str) -> DremioEngine:
     )
 
 
+def _display_path_tail(path: str, levels: int = 1) -> str:
+    parts = [p.strip().strip('"').strip("'") for p in path.split(".") if p.strip()]
+    return " / ".join(parts[-levels:]) if parts else path
+
+
+def _unique_display_map(values: list[str], levels: int = 1) -> dict[str, str]:
+    labels = [_display_path_tail(value, levels=levels) for value in values]
+    duplicated = {label for label in labels if labels.count(label) > 1}
+    result = {}
+    for value, label in zip(values, labels):
+        final_label = _display_path_tail(value, levels=2) if label in duplicated else label
+        result[final_label] = value
+    return result
+
+
+def _view_label(view) -> str:
+    return getattr(view, "name", None) or _display_path_tail(view.full_path, levels=1)
+
+
+def _unique_view_display_map(views) -> dict[str, object]:
+    labels = [_view_label(view) for view in views]
+    duplicated = {label for label in labels if labels.count(label) > 1}
+    result = {}
+    for view, label in zip(views, labels):
+        if label in duplicated:
+            label = f"{_display_path_tail(view.full_path, levels=2)}"
+        result[label] = view
+    return result
+
+
 def setup_dremio_ui():
     st.subheader("Fonte Dremio")
     st.caption("Informe seu PAT e escolha catálogo, pasta e view.")
@@ -291,50 +321,76 @@ def setup_dremio_ui():
             st.session_state.dremio_selected_container = None
             st.session_state.dremio_selected_view = None
 
-        if st.button("Listar pastas e views", disabled=not effective_pat or not selected_catalog):
+        if st.button("Listar pastas", disabled=not effective_pat or not selected_catalog):
             try:
                 engine = _create_dremio_engine(effective_pat)
                 st.session_state.dremio_containers = engine.list_child_containers(selected_catalog)
-                st.session_state.dremio_views = engine.list_datasets(selected_catalog, recursive=False)
-                if not st.session_state.dremio_containers and not st.session_state.dremio_views:
-                    st.warning("Não encontrei pastas ou views nesse catálogo.")
+                st.session_state.dremio_views = []
+                if not st.session_state.dremio_containers:
+                    st.warning("Não encontrei pastas nesse catálogo.")
             except Exception as exc:
-                st.error(f"Falha ao listar catálogo: {exc}")
+                st.error(f"Falha ao listar pastas: {exc}")
 
     containers = st.session_state.get("dremio_containers", [])
     selected_container = None
     if containers:
-        selected_container = st.selectbox("Pasta", ["(usar catálogo inteiro)"] + containers, key="dremio_container_select")
-        if selected_container == "(usar catálogo inteiro)":
-            selected_container = selected_catalog
+        container_map = _unique_display_map(containers, levels=1)
+        container_options = ["(usar catálogo inteiro)"] + list(container_map.keys())
+        selected_container_label = st.selectbox("Pasta", container_options, key="dremio_container_select")
+        selected_container = selected_catalog if selected_container_label == "(usar catálogo inteiro)" else container_map[selected_container_label]
+
         if selected_container != st.session_state.get("dremio_selected_container"):
             st.session_state.dremio_selected_container = selected_container
             st.session_state.dremio_views = []
             st.session_state.dremio_selected_view = None
 
-        if st.button("Listar views", disabled=not effective_pat or not selected_container):
+        if st.button("Carregar views da pasta", disabled=not effective_pat or not selected_container):
             try:
                 engine = _create_dremio_engine(effective_pat)
                 st.session_state.dremio_views = engine.list_datasets(selected_container, recursive=True)
+                st.session_state.dremio_selected_view = None
                 if not st.session_state.dremio_views:
                     st.warning("Não encontrei views nessa pasta.")
             except Exception as exc:
-                st.error(f"Falha ao listar views: {exc}")
+                st.error(f"Falha ao carregar views: {exc}")
 
     views = st.session_state.get("dremio_views", [])
     selected_view = None
     if views:
-        view_options = ["(usar todas as views listadas)"] + [view.full_path for view in views]
-        selected_view = st.selectbox("View", view_options, key="dremio_view_select")
-        if selected_view == "(usar todas as views listadas)":
-            selected_view = None
-        st.caption(f"{len(views)} view(s) encontrada(s).")
+        view_search = st.text_input(
+            "View",
+            value="",
+            placeholder="Digite o nome da view. Ex: INAD",
+            key="dremio_view_search",
+        )
+        query = view_search.strip().lower()
+        filtered_views = [
+            view for view in views
+            if not query or query in _view_label(view).lower() or query in view.full_path.lower()
+        ]
+
+        if filtered_views:
+            view_map = _unique_view_display_map(filtered_views)
+            selected_view_label = st.selectbox(
+                "Views encontradas",
+                list(view_map.keys()),
+                key="dremio_view_select",
+            )
+            selected_view_obj = view_map[selected_view_label]
+            selected_view = selected_view_obj.full_path
+            st.session_state.dremio_selected_view = selected_view
+            st.caption(f"View selecionada: `{_view_label(selected_view_obj)}`")
+            st.caption(f"Caminho técnico: `{selected_view}`")
+        else:
+            st.info("Nenhuma view encontrada com esse filtro.")
+
+        st.caption(f"{len(filtered_views)} de {len(views)} view(s) encontrada(s).")
 
     if st.button("Conectar Dremio", type="primary", disabled=not effective_pat or not (selected_catalog or selected_view)):
         try:
             if selected_view:
                 allowed = [selected_view]
-                loaded_label = f"View selecionada: {selected_view}"
+                loaded_label = f"View selecionada: {_display_path_tail(selected_view, levels=1)}"
             elif views:
                 allowed = [view.full_path for view in views]
                 loaded_label = f"{len(views)} views selecionadas"
@@ -406,6 +462,7 @@ def render_sidebar():
             st.session_state.dremio_catalogs = []
             st.session_state.dremio_containers = []
             st.session_state.dremio_views = []
+            st.session_state.dremio_selected_view = None
             st.rerun()
 
 
