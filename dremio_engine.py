@@ -1,5 +1,6 @@
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 
@@ -36,6 +37,20 @@ class DremioEngine(AnalyticsEngine):
             return f"{self.host}/v0/projects/{self.project_id}/sql"
         return f"{self.host}/api/v3/sql"
 
+    def _clean_path_parts(self, user_path: str) -> list[str]:
+        cleaned = user_path.strip().rstrip("/")
+        if cleaned.endswith(".*"):
+            cleaned = cleaned[:-2]
+        if cleaned.endswith("*"):
+            cleaned = cleaned[:-1].rstrip(".").rstrip("/")
+
+        parts = []
+        for part in cleaned.split("."):
+            value = part.strip().strip('"').strip("'").strip()
+            if value:
+                parts.append(value)
+        return parts
+
     def list_catalogs(self) -> list[str]:
         resp = self.session.get(self._api_url("catalog"))
         resp.raise_for_status()
@@ -49,9 +64,9 @@ class DremioEngine(AnalyticsEngine):
         return sorted(set(catalogs), key=str.lower)
 
     def _resolve_allowed_path(self, user_path: str) -> list[str]:
-        requested = user_path.strip()
+        requested_parts = self._clean_path_parts(user_path)
+        requested = ".".join(requested_parts)
         requested_lower = requested.lower()
-        requested_parts = requested.split(".")
 
         try:
             resp = self.session.get(self._api_url("catalog"))
@@ -70,20 +85,10 @@ class DremioEngine(AnalyticsEngine):
         return requested_parts
 
     def _sql_path_parts(self, path_parts: list[str]) -> list[str]:
-        """Normalize catalog path parts into a SQL path.
-
-        Dremio Cloud API calls are already scoped by project_id, but some catalog
-        responses include the Dremio project display name as the first path part.
-        That first segment is not valid in SQL. SQL paths should start at the
-        space/source level, for example:
-
-        API/catalog path: ["grupo-bild", "MODULAR", "MODULAR_VIEW", "VW_X"]
-        SQL path:         "MODULAR"."MODULAR_VIEW"."VW_X"
-        """
-        parts = list(path_parts)
+        parts = [p.strip().strip('"').strip("'").strip() for p in path_parts if p]
 
         if self.is_cloud and len(parts) > 1:
-            allowed = {p.strip().lower() for p in self.allowed_paths if p.strip()}
+            allowed = {p.strip().strip('"').strip("'").lower() for p in self.allowed_paths if p.strip()}
             second = parts[1].strip().lower()
 
             if allowed and second in allowed:
@@ -111,28 +116,34 @@ class DremioEngine(AnalyticsEngine):
         return tables
 
     def _list_path(self, path_parts: list[str]) -> list[TableInfo]:
-        path_encoded = "/".join(path_parts)
+        clean_parts = [p.strip().strip('"').strip("'").strip() for p in path_parts if p]
+        path_encoded = "/".join(quote(p, safe="") for p in clean_parts)
         url = self._api_url(f"catalog/by-path/{path_encoded}")
         try:
             resp = self.session.get(url)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            print(f"Aviso: não consegui listar {path_parts}: {e}")
+            print(f"Aviso: não consegui listar {clean_parts}: {e}")
             return []
 
         tables = []
         for child in data.get("children", []):
-            ctype = child.get("type")
-            if ctype == "DATASET":
-                tables.append(TableInfo(
-                    name=child["path"][-1],
-                    full_path=self._quote_sql_path(child["path"]),
-                    columns=[],
-                    description=child.get("datasetType", ""),
-                ))
-            elif ctype == "CONTAINER":
-                tables.extend(self._list_path(child["path"]))
+            ctype = child.get("type") or child.get("containerType") or child.get("entityType")
+            dataset_type = child.get("datasetType")
+            child_path = child.get("path") or []
+
+            if ctype == "DATASET" or dataset_type:
+                if child_path:
+                    tables.append(TableInfo(
+                        name=child_path[-1],
+                        full_path=self._quote_sql_path(child_path),
+                        columns=[],
+                        description=dataset_type or "Dataset do Dremio",
+                    ))
+            elif ctype in ("CONTAINER", "SPACE", "SOURCE", "FOLDER", "HOME"):
+                if child_path:
+                    tables.extend(self._list_path(child_path))
         return tables
 
     def describe_table(self, table_full_path: str) -> TableInfo:
