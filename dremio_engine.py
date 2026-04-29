@@ -36,6 +36,39 @@ class DremioEngine(AnalyticsEngine):
             return f"{self.host}/v0/projects/{self.project_id}/sql"
         return f"{self.host}/api/v3/sql"
 
+    def list_catalogs(self) -> list[str]:
+        resp = self.session.get(self._api_url("catalog"))
+        resp.raise_for_status()
+        catalogs = []
+        for item in resp.json().get("data", []):
+            if item.get("containerType") in ("SPACE", "SOURCE", "FOLDER"):
+                path = item.get("path") or []
+                if path:
+                    catalogs.append(".".join(path))
+                    catalogs.append(path[-1])
+        return sorted(set(catalogs), key=str.lower)
+
+    def _resolve_allowed_path(self, user_path: str) -> list[str]:
+        requested = user_path.strip()
+        requested_lower = requested.lower()
+        requested_parts = requested.split(".")
+
+        try:
+            resp = self.session.get(self._api_url("catalog"))
+            resp.raise_for_status()
+            for item in resp.json().get("data", []):
+                path = item.get("path") or []
+                if not path:
+                    continue
+                full = ".".join(path)
+                last = path[-1]
+                if full.lower() == requested_lower or last.lower() == requested_lower:
+                    return path
+        except Exception as e:
+            print(f"Aviso: não consegui resolver catálogo '{user_path}': {e}")
+
+        return requested_parts
+
     def _sql_path_parts(self, path_parts: list[str]) -> list[str]:
         """Normalize catalog path parts into a SQL path.
 
@@ -53,15 +86,8 @@ class DremioEngine(AnalyticsEngine):
             allowed = {p.strip().lower() for p in self.allowed_paths if p.strip()}
             second = parts[1].strip().lower()
 
-            # If the user restricted catalog listing to a workspace/space and the
-            # second segment matches it, the first segment is the project display
-            # name and must be removed from SQL.
             if allowed and second in allowed:
                 parts = parts[1:]
-
-            # Fallback for common Dremio Cloud catalog shape. Project display
-            # names frequently contain hyphen/space and appear before the SQL
-            # namespace. Keep this conservative to avoid stripping real spaces.
             elif "-" in parts[0] or " " in parts[0]:
                 parts = parts[1:]
 
@@ -80,7 +106,8 @@ class DremioEngine(AnalyticsEngine):
                     tables.extend(self._list_path(item["path"]))
         else:
             for path in self.allowed_paths:
-                tables.extend(self._list_path(path.split(".")))
+                resolved = self._resolve_allowed_path(path)
+                tables.extend(self._list_path(resolved))
         return tables
 
     def _list_path(self, path_parts: list[str]) -> list[TableInfo]:
