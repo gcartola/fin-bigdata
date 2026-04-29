@@ -375,7 +375,7 @@ def render_sidebar():
         st.write(f"Modelo: `{model}`")
 
         st.markdown("### Fonte de dados")
-        mode = st.radio("Modo", ["Planilha", "Dremio"], horizontal=True)
+        mode = st.radio("Modo", ["Dremio", "Planilha"], horizontal=True)
 
         st.divider()
         if mode == "Planilha":
