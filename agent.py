@@ -129,6 +129,21 @@ class Agent:
         self.conversation: list[types.Content] = []
         self.last_query_result = None
 
+    def load_history(self, messages: list[dict], max_messages: int = 20) -> None:
+        """Reidrata o contexto textual recente salvo fora do processo.
+
+        Não tenta reconstruir tool calls antigas. Para memória operacional, o app
+        persiste SQL/resumos como metadados e injeta apenas o histórico textual
+        recente no modelo.
+        """
+        self.conversation = []
+        for message in messages[-max_messages:]:
+            role = message.get("role")
+            content = (message.get("content") or "").strip()
+            if role not in ("user", "assistant") or not content:
+                continue
+            self.conversation.append(types.Content(role=role, parts=[types.Part(text=content)]))
+
     def _tool_label(self, name: str, args: dict) -> str:
         if name == "list_tables":
             return "Listando tabelas/views disponíveis"
