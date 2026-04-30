@@ -479,6 +479,7 @@ def new_conversation():
 
 def render_conversation_sidebar():
     st.markdown("### Conversas")
+    st.caption("Abra uma conversa salva depois de conectar uma fonte, ou comece uma nova análise.")
     if st.session_state.get("memory_error"):
         st.caption(f"Memória persistente indisponível: {st.session_state.memory_error}")
         return
@@ -524,9 +525,6 @@ def render_sidebar():
         else:
             st.warning("App bloqueado. Informe seu PAT para liberar o agente.")
         st.divider()
-        if st.session_state.get("authenticated"):
-            render_conversation_sidebar()
-            st.divider()
         setup_dremio_ui()
         st.divider()
         setup_spreadsheet_ui()
@@ -543,6 +541,9 @@ def render_sidebar():
         if st.button("Resetar sessão"):
             reset_workspace(keep_auth=True)
             st.rerun()
+        if st.session_state.get("authenticated"):
+            st.divider()
+            render_conversation_sidebar()
 
 
 def render_auth_gate() -> bool:
