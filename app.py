@@ -12,6 +12,7 @@ from auth import DremioPATAuthenticator
 from dremio_engine import DremioEngine
 from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_upload_bucket
 from hybrid_engine import HybridEngine
+from memory_store import MemoryStoreUnavailable, get_memory_store
 from spreadsheet_engine import SpreadsheetEngine
 
 
@@ -20,7 +21,6 @@ DREMIO_CLOUD_PROJECT_ID = os.getenv(
     "DREMIO_PROJECT_ID",
     "e2f7d480-9c76-49c0-86e5-18555dd15571",
 ).strip()
-
 
 st.set_page_config(page_title="Fin BigData", page_icon="📊", layout="wide")
 
@@ -46,6 +46,10 @@ def init_state():
         "user_email": None,
         "user_id": None,
         "dremio_pat": None,
+        "memory_store": None,
+        "memory_error": None,
+        "conversation_id": None,
+        "saved_conversations": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -59,21 +63,88 @@ def get_vertex_config():
     return project_id, location, model
 
 
+def memory():
+    if st.session_state.get("memory_store") or st.session_state.get("memory_error"):
+        return st.session_state.get("memory_store")
+    try:
+        st.session_state.memory_store = get_memory_store()
+    except MemoryStoreUnavailable as exc:
+        st.session_state.memory_error = str(exc)
+        st.session_state.memory_store = None
+    return st.session_state.get("memory_store")
+
+
+def refresh_conversations():
+    store = memory()
+    user_id = st.session_state.get("user_id")
+    if store and user_id:
+        st.session_state.saved_conversations = store.list_conversations(user_id)
+    else:
+        st.session_state.saved_conversations = []
+
+
+def ensure_conversation(title: str = "Nova conversa") -> str | None:
+    if st.session_state.get("conversation_id"):
+        return st.session_state.conversation_id
+    store = memory()
+    user_id = st.session_state.get("user_id")
+    if not store or not user_id:
+        return None
+    conversation_id = store.create_conversation(user_id=user_id, title=title)
+    st.session_state.conversation_id = conversation_id
+    refresh_conversations()
+    return conversation_id
+
+
+def append_persistent_message(role: str, content: str, **metadata):
+    conversation_id = ensure_conversation(title=(content[:48] if role == "user" else "Nova conversa"))
+    store = memory()
+    if store and conversation_id:
+        store.append_message(conversation_id, role, content, **metadata)
+
+
+def update_conversation_state(**metadata):
+    store = memory()
+    conversation_id = st.session_state.get("conversation_id")
+    if store and conversation_id:
+        store.update_conversation(conversation_id, **metadata)
+        refresh_conversations()
+
+
+def load_conversation(conversation_id: str):
+    store = memory()
+    if not store:
+        return
+    messages = store.get_messages(conversation_id, limit=50)
+    st.session_state.conversation_id = conversation_id
+    st.session_state.messages = [
+        {"role": m.get("role"), "content": m.get("content", "")}
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    ]
+    if st.session_state.get("agent"):
+        st.session_state.agent.load_history(st.session_state.messages)
+
+
 def create_agent(engine):
     project_id, location, model = get_vertex_config()
     if not project_id:
         st.error("Defina GOOGLE_CLOUD_PROJECT no ambiente antes de iniciar o agente.")
         return None
-    return Agent(engine, model=model, project_id=project_id, location=location)
+    agent = Agent(engine, model=model, project_id=project_id, location=location)
+    if st.session_state.get("messages"):
+        agent.load_history(st.session_state.messages)
+    return agent
 
 
-def activate_engine(engine, loaded: list[str], success_message: str):
+def activate_engine(engine, loaded: list[str], success_message: str, source_metadata: dict | None = None):
     agent = create_agent(engine)
     if agent:
         st.session_state.engine = engine
         st.session_state.agent = agent
         st.session_state.loaded_files = loaded
-        st.session_state.messages = []
+        ensure_conversation()
+        update_conversation_state(active_sources=loaded, **(source_metadata or {}))
         st.success(success_message)
 
 
@@ -93,61 +164,51 @@ def save_uploaded_file(uploaded_file) -> str:
     return str(target)
 
 
+def result_summary(result) -> str | None:
+    if not result:
+        return None
+    return f"{result.row_count} linhas, {len(result.columns)} colunas, {result.execution_time_ms}ms"
+
+
 def render_download_buttons():
     agent = st.session_state.get("agent")
     if not agent:
         return
-
     result = getattr(agent, "last_query_result", None)
     if not result or not result.rows:
         return
 
     df = pd.DataFrame(result.rows, columns=result.columns)
     csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-
     excel_buffer = BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="resultado")
 
     unique_key = f"{len(st.session_state.messages)}_{result.row_count}_{abs(hash(result.sql_executed or ''))}"
-
     st.divider()
     st.caption(f"Resultado disponível para download: {len(df):,} linhas")
     col1, col2 = st.columns(2)
-
     with col1:
-        st.download_button(
-            label="Baixar CSV",
-            data=csv_bytes,
-            file_name="resultado_fin_bigdata.csv",
-            mime="text/csv",
-            use_container_width=True,
-            key=f"download_csv_{unique_key}",
-        )
-
+        st.download_button("Baixar CSV", csv_bytes, "resultado_fin_bigdata.csv", "text/csv", use_container_width=True, key=f"download_csv_{unique_key}")
     with col2:
-        st.download_button(
-            label="Baixar Excel",
-            data=excel_buffer.getvalue(),
-            file_name="resultado_fin_bigdata.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key=f"download_excel_{unique_key}",
-        )
+        st.download_button("Baixar Excel", excel_buffer.getvalue(), "resultado_fin_bigdata.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key=f"download_excel_{unique_key}")
 
 
-def start_spreadsheet_agent(engine: SpreadsheetEngine, loaded: list[str]):
+def start_spreadsheet_agent(engine: SpreadsheetEngine, loaded: list[str], gcs_uri: str | None = None):
     st.session_state.spreadsheet_engine = engine
     st.session_state.spreadsheet_loaded_files = loaded
-    activate_engine(engine, loaded, "Planilha carregada e agente inicializado.")
+    activate_engine(
+        engine,
+        loaded,
+        "Planilha carregada e agente inicializado.",
+        {"uploaded_files_gcs": [gcs_uri] if gcs_uri else []},
+    )
 
 
 def setup_local_spreadsheet_upload():
     st.markdown("#### Upload local")
     st.caption("Indicado para arquivos pequenos. Em Cloud Run, prefira o upload via GCS para evitar limite de request.")
-
     uploads = st.file_uploader("Arquivos", type=["csv", "xlsx", "xls", "parquet"], accept_multiple_files=True)
-
     if st.button("Carregar arquivos locais", type="primary", disabled=not uploads):
         engine = SpreadsheetEngine()
         loaded = []
@@ -161,134 +222,42 @@ def setup_local_spreadsheet_upload():
             except Exception as exc:
                 st.error(f"Erro ao carregar {uploaded.name}: {exc}")
                 return
-
         start_spreadsheet_agent(engine, loaded)
 
 
 def render_signed_upload_component(signed_url: str, gcs_uri: str):
     components.html(
         f"""
-        <style>
-          .gcs-card {{
-            box-sizing: border-box;
-            width: 100%;
-            max-width: 100%;
-            border: 1px solid rgba(250, 250, 250, 0.28);
-            border-radius: 12px;
-            padding: 14px;
-            background: rgba(255, 255, 255, 0.04);
-            color: #f8fafc;
-            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          }}
-          .gcs-title {{
-            font-size: 14px;
-            font-weight: 700;
-            margin-bottom: 10px;
-            color: #f8fafc;
-          }}
-          .gcs-file {{
-            display: block;
-            width: 100%;
-            box-sizing: border-box;
-            color: #f8fafc;
-            font-size: 12px;
-            margin-bottom: 10px;
-          }}
-          .gcs-file::file-selector-button {{
-            border: 1px solid rgba(250, 250, 250, 0.28);
-            border-radius: 8px;
-            background: #111827;
-            color: #f8fafc;
-            padding: 7px 10px;
-            margin-right: 8px;
-            cursor: pointer;
-          }}
-          .gcs-button {{
-            width: 100%;
-            border: 0;
-            border-radius: 10px;
-            background: #ff4b4b;
-            color: white;
-            padding: 9px 10px;
-            font-weight: 700;
-            cursor: pointer;
-          }}
-          .gcs-button:disabled {{
-            opacity: 0.55;
-            cursor: not-allowed;
-          }}
-          .gcs-status {{
-            margin-top: 10px;
-            padding: 10px;
-            border-radius: 10px;
-            background: rgba(15, 23, 42, 0.9);
-            color: #e5e7eb;
-            font-size: 12px;
-            line-height: 1.35;
-            white-space: pre-wrap;
-            word-break: break-word;
-            min-height: 18px;
-          }}
-          .gcs-status.success {{
-            background: rgba(22, 101, 52, 0.35);
-            color: #bbf7d0;
-          }}
-          .gcs-status.error {{
-            background: rgba(127, 29, 29, 0.38);
-            color: #fecaca;
-          }}
-        </style>
-        <div class="gcs-card">
-          <div class="gcs-title">Upload direto para GCS</div>
-          <input id="file" class="gcs-file" type="file" />
-          <button id="upload" class="gcs-button">Enviar para GCS</button>
-          <div id="status" class="gcs-status">Selecione o arquivo e envie para o bucket.</div>
+        <div style='border:1px solid rgba(250,250,250,.28);border-radius:12px;padding:14px;font-family:Inter;color:#f8fafc;background:rgba(255,255,255,.04)'>
+          <b>Upload direto para GCS</b><br/><br/>
+          <input id='file' type='file' style='width:100%;margin-bottom:10px;color:#f8fafc'/>
+          <button id='upload' style='width:100%;border:0;border-radius:10px;background:#ff4b4b;color:white;padding:9px;font-weight:700'>Enviar para GCS</button>
+          <pre id='status' style='white-space:pre-wrap;background:rgba(15,23,42,.9);padding:10px;border-radius:10px'>Selecione o arquivo e envie para o bucket.</pre>
         </div>
         <script>
         const signedUrl = {signed_url!r};
         const gcsUri = {gcs_uri!r};
-        const uploadButton = document.getElementById('upload');
-        const status = document.getElementById('status');
-
-        function setStatus(text, cls) {{
-          status.className = 'gcs-status' + (cls ? ` ${{cls}}` : '');
-          status.textContent = text;
-        }}
-
-        uploadButton.onclick = async () => {{
+        document.getElementById('upload').onclick = async () => {{
           const file = document.getElementById('file').files[0];
-          if (!file) {{
-            setStatus('Selecione um arquivo primeiro.', 'error');
-            return;
-          }}
-          uploadButton.disabled = true;
-          setStatus('Enviando... não feche esta página.');
+          const status = document.getElementById('status');
+          if (!file) {{ status.textContent = 'Selecione um arquivo primeiro.'; return; }}
+          status.textContent = 'Enviando...';
           try {{
-            const response = await fetch(signedUrl, {{
-              method: 'PUT',
-              body: file
-            }});
+            const response = await fetch(signedUrl, {{ method: 'PUT', body: file }});
             const detail = await response.text();
-            if (!response.ok) {{
-              throw new Error(`HTTP ${{response.status}} ${{response.statusText}} ${{detail}}`);
-            }}
-            setStatus(`Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`, 'success');
-          }} catch (err) {{
-            setStatus(`Falha no upload: ${{err.message}}`, 'error');
-          }} finally {{
-            uploadButton.disabled = false;
-          }}
+            if (!response.ok) throw new Error(`HTTP ${{response.status}} ${{detail}}`);
+            status.textContent = `Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`;
+          }} catch (err) {{ status.textContent = `Falha no upload: ${{err.message}}`; }}
         }};
         </script>
         """,
-        height=245,
+        height=220,
     )
 
 
 def setup_gcs_spreadsheet_upload():
     st.markdown("#### Upload grande via GCS")
     st.caption("O arquivo vai direto do navegador para o bucket. O Streamlit recebe só o caminho gs:// para consulta.")
-
     try:
         bucket = get_upload_bucket()
         st.caption(f"Bucket configurado: `{bucket}`")
@@ -297,7 +266,6 @@ def setup_gcs_spreadsheet_upload():
         return
 
     filename = st.text_input("Nome do arquivo", placeholder="base_cobranca.xlsx, base_cobranca.csv ou base_cobranca.parquet")
-
     if st.button("Gerar signed URL", disabled=not filename):
         try:
             st.session_state.signed_upload = create_signed_upload_url(filename=filename)
@@ -308,7 +276,6 @@ def setup_gcs_spreadsheet_upload():
     if signed_upload:
         st.code(signed_upload.gcs_uri)
         render_signed_upload_component(signed_upload.signed_url, signed_upload.gcs_uri)
-
         table_name = Path(signed_upload.object_name).stem.lower().replace("-", "_").replace(" ", "_")
         table_name = st.text_input("Nome da tabela no DuckDB", value=table_name)
         if st.button("Usar arquivo enviado", type="primary"):
@@ -317,7 +284,7 @@ def setup_gcs_spreadsheet_upload():
                 configure_engine_gcs(engine)
                 table = engine.load_file(signed_upload.gcs_uri, table_name)
                 info = engine.describe_table(table)
-                start_spreadsheet_agent(engine, [f"{info.full_path} — {info.row_count:,} linhas — {signed_upload.gcs_uri}"])
+                start_spreadsheet_agent(engine, [f"{info.full_path} — {info.row_count:,} linhas — {signed_upload.gcs_uri}"], signed_upload.gcs_uri)
             except Exception as exc:
                 st.error(f"Erro ao carregar arquivo do GCS: {exc}")
 
@@ -325,7 +292,6 @@ def setup_gcs_spreadsheet_upload():
 def setup_spreadsheet_ui():
     st.subheader("Fonte Planilha")
     st.caption("Use DuckDB para consultar CSV, XLSX ou Parquet. Para arquivos grandes, use GCS.")
-
     tab_gcs, tab_local = st.tabs(["GCS / arquivo grande", "Upload local / dev"])
     with tab_gcs:
         setup_gcs_spreadsheet_upload()
@@ -334,13 +300,7 @@ def setup_spreadsheet_ui():
 
 
 def _create_dremio_engine(pat: str) -> DremioEngine:
-    return DremioEngine(
-        host=DREMIO_CLOUD_HOST,
-        pat=pat,
-        project_id=DREMIO_CLOUD_PROJECT_ID,
-        is_cloud=True,
-        allowed_paths=[],
-    )
+    return DremioEngine(DREMIO_CLOUD_HOST, pat, DREMIO_CLOUD_PROJECT_ID, is_cloud=True, allowed_paths=[])
 
 
 def _display_path_tail(path: str, levels: int = 1) -> str:
@@ -351,11 +311,7 @@ def _display_path_tail(path: str, levels: int = 1) -> str:
 def _unique_display_map(values: list[str], levels: int = 1) -> dict[str, str]:
     labels = [_display_path_tail(value, levels=levels) for value in values]
     duplicated = {label for label in labels if labels.count(label) > 1}
-    result = {}
-    for value, label in zip(values, labels):
-        final_label = _display_path_tail(value, levels=2) if label in duplicated else label
-        result[final_label] = value
-    return result
+    return {(_display_path_tail(value, levels=2) if label in duplicated else label): value for value, label in zip(values, labels)}
 
 
 def _view_label(view) -> str:
@@ -365,25 +321,18 @@ def _view_label(view) -> str:
 def _unique_view_display_map(views) -> dict[str, object]:
     labels = [_view_label(view) for view in views]
     duplicated = {label for label in labels if labels.count(label) > 1}
-    result = {}
-    for view, label in zip(views, labels):
-        if label in duplicated:
-            label = f"{_display_path_tail(view.full_path, levels=2)}"
-        result[label] = view
-    return result
+    return {(_display_path_tail(view.full_path, levels=2) if label in duplicated else label): view for view, label in zip(views, labels)}
 
 
 def setup_dremio_ui():
     st.subheader("Fonte Dremio")
     st.caption("Escolha catálogo, pasta e view com o PAT validado no desbloqueio do app.")
-
     effective_pat = st.session_state.get("dremio_pat")
     if not effective_pat:
         st.info("Desbloqueie o app com seu PAT do Dremio para carregar as fontes.")
         return
 
     st.caption(f"Usuário Dremio: `{st.session_state.get('user_email')}`")
-
     if st.button("Buscar catálogos"):
         try:
             engine = _create_dremio_engine(effective_pat)
@@ -408,7 +357,6 @@ def setup_dremio_ui():
             st.session_state.dremio_views = []
             st.session_state.dremio_selected_container = None
             st.session_state.dremio_selected_view = None
-
         if st.button("Listar pastas", disabled=not selected_catalog):
             try:
                 engine = _create_dremio_engine(effective_pat)
@@ -426,12 +374,10 @@ def setup_dremio_ui():
         container_options = ["(usar catálogo inteiro)"] + list(container_map.keys())
         selected_container_label = st.selectbox("Pasta", container_options, key="dremio_container_select")
         selected_container = selected_catalog if selected_container_label == "(usar catálogo inteiro)" else container_map[selected_container_label]
-
         if selected_container != st.session_state.get("dremio_selected_container"):
             st.session_state.dremio_selected_container = selected_container
             st.session_state.dremio_views = []
             st.session_state.dremio_selected_view = None
-
         if st.button("Carregar views da pasta", disabled=not selected_container):
             try:
                 engine = _create_dremio_engine(effective_pat)
@@ -445,25 +391,12 @@ def setup_dremio_ui():
     views = st.session_state.get("dremio_views", [])
     selected_view = None
     if views:
-        view_search = st.text_input(
-            "View",
-            value="",
-            placeholder="Digite o nome da view. Ex: INAD",
-            key="dremio_view_search",
-        )
+        view_search = st.text_input("View", value="", placeholder="Digite o nome da view. Ex: INAD", key="dremio_view_search")
         query = view_search.strip().lower()
-        filtered_views = [
-            view for view in views
-            if not query or query in _view_label(view).lower() or query in view.full_path.lower()
-        ]
-
+        filtered_views = [view for view in views if not query or query in _view_label(view).lower() or query in view.full_path.lower()]
         if filtered_views:
             view_map = _unique_view_display_map(filtered_views)
-            selected_view_label = st.selectbox(
-                "Views encontradas",
-                list(view_map.keys()),
-                key="dremio_view_select",
-            )
+            selected_view_label = st.selectbox("Views encontradas", list(view_map.keys()), key="dremio_view_select")
             selected_view_obj = view_map[selected_view_label]
             selected_view = selected_view_obj.full_path
             st.session_state.dremio_selected_view = selected_view
@@ -471,7 +404,6 @@ def setup_dremio_ui():
             st.caption(f"Caminho técnico: `{selected_view}`")
         else:
             st.info("Nenhuma view encontrada com esse filtro.")
-
         st.caption(f"{len(filtered_views)} de {len(views)} view(s) encontrada(s).")
 
     if st.button("Conectar Dremio", type="primary", disabled=not (selected_catalog or selected_view)):
@@ -486,19 +418,12 @@ def setup_dremio_ui():
                 path = st.session_state.get("dremio_selected_container") or selected_catalog
                 allowed = [path] if path else []
                 loaded_label = f"Catálogo selecionado: {path}"
-
-            engine = DremioEngine(
-                host=DREMIO_CLOUD_HOST,
-                pat=effective_pat,
-                project_id=DREMIO_CLOUD_PROJECT_ID,
-                is_cloud=True,
-                allowed_paths=allowed,
-            )
+            engine = DremioEngine(DREMIO_CLOUD_HOST, effective_pat, DREMIO_CLOUD_PROJECT_ID, is_cloud=True, allowed_paths=allowed)
             tables = engine.list_tables()
             loaded = [loaded_label, f"{len(tables)} tabelas/views visíveis no Dremio"]
             st.session_state.dremio_engine = engine
             st.session_state.dremio_loaded_files = loaded
-            activate_engine(engine, loaded, "Dremio conectado e agente inicializado.")
+            activate_engine(engine, loaded, "Dremio conectado e agente inicializado.", {"selected_dremio_view": selected_view, "active_sources": loaded})
         except Exception as exc:
             st.error(f"Falha ao conectar no Dremio: {exc}")
 
@@ -506,10 +431,8 @@ def setup_dremio_ui():
 def render_relationship_ui():
     st.markdown("### Relacionamento")
     st.caption("Combine Dremio e Planilha para cruzar dados entre fontes no chat.")
-
     has_dremio = st.session_state.get("dremio_engine") is not None
     has_spreadsheet = st.session_state.get("spreadsheet_engine") is not None
-
     if not has_dremio or not has_spreadsheet:
         st.button("🔗 Criar relacionamento entre fontes", disabled=True, use_container_width=True)
         missing = []
@@ -519,72 +442,79 @@ def render_relationship_ui():
             missing.append("Planilha")
         st.caption(f"Conecte {' e '.join(missing)} para ativar a análise combinada.")
         return
-
     if st.button("🔗 Ativar análise combinada", type="primary", use_container_width=True):
-        hybrid = HybridEngine(
-            dremio_engine=st.session_state.dremio_engine,
-            spreadsheet_engine=st.session_state.spreadsheet_engine,
-        )
-        loaded = [
-            "Modo combinado ativo: Dremio + Planilha",
-            *st.session_state.get("dremio_loaded_files", []),
-            *st.session_state.get("spreadsheet_loaded_files", []),
-        ]
-        activate_engine(hybrid, loaded, "Análise combinada ativada. Oriente o agente pelo chat sobre como relacionar as fontes.")
-
+        hybrid = HybridEngine(st.session_state.dremio_engine, st.session_state.spreadsheet_engine)
+        loaded = ["Modo combinado ativo: Dremio + Planilha", *st.session_state.get("dremio_loaded_files", []), *st.session_state.get("spreadsheet_loaded_files", [])]
+        activate_engine(hybrid, loaded, "Análise combinada ativada. Oriente o agente pelo chat sobre como relacionar as fontes.", {"active_sources": loaded})
     st.caption("Exemplo: busque um contrato no Dremio; com nome/CPF encontrados, procure o cliente na planilha.")
 
 
 def reset_workspace(keep_auth: bool = True):
     preserved = {}
     if keep_auth:
-        preserved = {
-            "authenticated": st.session_state.get("authenticated"),
-            "user_email": st.session_state.get("user_email"),
-            "user_id": st.session_state.get("user_id"),
-            "dremio_pat": st.session_state.get("dremio_pat"),
-        }
-
+        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations"]:
+            preserved[key] = st.session_state.get(key)
     for key in [
-        "engine",
-        "agent",
-        "messages",
-        "loaded_files",
-        "signed_upload",
-        "dremio_engine",
-        "spreadsheet_engine",
-        "dremio_loaded_files",
-        "spreadsheet_loaded_files",
-        "dremio_catalogs",
-        "dremio_containers",
-        "dremio_views",
-        "dremio_selected_catalog",
-        "dremio_selected_container",
-        "dremio_selected_view",
+        "engine", "agent", "messages", "loaded_files", "signed_upload", "dremio_engine", "spreadsheet_engine",
+        "dremio_loaded_files", "spreadsheet_loaded_files", "dremio_catalogs", "dremio_containers", "dremio_views",
+        "dremio_selected_catalog", "dremio_selected_container", "dremio_selected_view",
     ]:
-        if key in st.session_state:
-            del st.session_state[key]
-
+        st.session_state.pop(key, None)
     if not keep_auth:
-        for key in ["authenticated", "user_email", "user_id", "dremio_pat"]:
-            if key in st.session_state:
-                del st.session_state[key]
-
+        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations"]:
+            st.session_state.pop(key, None)
     init_state()
     for key, value in preserved.items():
         st.session_state[key] = value
 
 
+def new_conversation():
+    st.session_state.conversation_id = None
+    st.session_state.messages = []
+    if st.session_state.get("agent"):
+        st.session_state.agent.load_history([])
+    ensure_conversation()
+    st.rerun()
+
+
+def render_conversation_sidebar():
+    st.markdown("### Conversas")
+    if st.session_state.get("memory_error"):
+        st.caption(f"Memória persistente indisponível: {st.session_state.memory_error}")
+        return
+    if not memory():
+        st.caption("Memória persistente desativada.")
+        return
+    if st.button("Nova conversa", use_container_width=True):
+        new_conversation()
+    refresh_conversations()
+    conversations = st.session_state.get("saved_conversations", [])
+    if not conversations:
+        st.caption("Nenhuma conversa salva ainda.")
+        return
+    labels = []
+    id_by_label = {}
+    for conv in conversations:
+        title = conv.get("title") or "Conversa sem título"
+        suffix = conv.get("id", "")[:8]
+        label = f"{title[:42]} · {suffix}"
+        labels.append(label)
+        id_by_label[label] = conv.get("id")
+    current = st.session_state.get("conversation_id")
+    current_label = next((label for label, cid in id_by_label.items() if cid == current), labels[0])
+    selected = st.selectbox("Abrir conversa", labels, index=labels.index(current_label), key="conversation_select")
+    if id_by_label[selected] != current:
+        load_conversation(id_by_label[selected])
+        st.rerun()
+
+
 def render_sidebar():
     _, _, model = get_vertex_config()
-
     with st.sidebar:
         st.title("Fin BigData")
         st.caption("Análises de BigData")
-
         st.markdown("### Agente")
         st.write(f"Modelo: `{model}`")
-
         if st.session_state.get("authenticated"):
             st.success("App desbloqueado")
             st.caption(f"Usuário: `{st.session_state.get('user_email')}`")
@@ -593,16 +523,15 @@ def render_sidebar():
                 st.rerun()
         else:
             st.warning("App bloqueado. Informe seu PAT para liberar o agente.")
-
         st.divider()
+        if st.session_state.get("authenticated"):
+            render_conversation_sidebar()
+            st.divider()
         setup_dremio_ui()
-
         st.divider()
         setup_spreadsheet_ui()
-
         st.divider()
         render_relationship_ui()
-
         st.divider()
         st.markdown("### Estado")
         if st.session_state.engine:
@@ -611,7 +540,6 @@ def render_sidebar():
                 st.caption(item)
         else:
             st.warning("Nenhuma engine ativa.")
-
         if st.button("Resetar sessão"):
             reset_workspace(keep_auth=True)
             st.rerun()
@@ -620,60 +548,37 @@ def render_sidebar():
 def render_auth_gate() -> bool:
     if st.session_state.get("authenticated"):
         return True
-
     st.markdown(
         """
         <style>
           [data-testid="stSidebar"] { filter: blur(1.5px); opacity: 0.72; }
-          .auth-card {
-            max-width: 560px;
-            margin: 8vh auto 0 auto;
-            padding: 28px;
-            border: 1px solid rgba(250, 250, 250, 0.16);
-            border-radius: 22px;
-            background: rgba(17, 24, 39, 0.78);
-            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
-          }
-          .auth-title { font-size: 32px; font-weight: 800; margin-bottom: 6px; }
-          .auth-subtitle { opacity: 0.76; margin-bottom: 18px; }
+          .auth-card { max-width:560px;margin:8vh auto 0 auto;padding:28px;border:1px solid rgba(250,250,250,.16);border-radius:22px;background:rgba(17,24,39,.78);box-shadow:0 24px 80px rgba(0,0,0,.35); }
+          .auth-title { font-size:32px;font-weight:800;margin-bottom:6px; }
+          .auth-subtitle { opacity:.76;margin-bottom:18px; }
         </style>
-        <div class="auth-card">
-          <div class="auth-title">Desbloquear Fin BigData</div>
-          <div class="auth-subtitle">
-            Use seu PAT do Dremio para validar permissões e identificar seu e-mail corporativo.
-            O token fica somente em memória nesta sessão.
-          </div>
-        </div>
+        <div class="auth-card"><div class="auth-title">Desbloquear Fin BigData</div><div class="auth-subtitle">Use seu PAT do Dremio para validar permissões e identificar seu e-mail corporativo. O token fica somente em memória nesta sessão.</div></div>
         """,
         unsafe_allow_html=True,
     )
-
     with st.form("dremio_pat_unlock_form"):
-        pat = st.text_input(
-            "Personal Access Token do Dremio",
-            value="",
-            type="password",
-            placeholder="Cole aqui o seu PAT do Dremio",
-        )
+        pat = st.text_input("Personal Access Token do Dremio", value="", type="password", placeholder="Cole aqui o seu PAT do Dremio")
         submitted = st.form_submit_button("Desbloquear app", type="primary", use_container_width=True)
-
     if submitted:
         try:
-            authenticator = DremioPATAuthenticator(
-                host=DREMIO_CLOUD_HOST,
-                project_id=DREMIO_CLOUD_PROJECT_ID,
-                is_cloud=True,
-            )
+            authenticator = DremioPATAuthenticator(DREMIO_CLOUD_HOST, DREMIO_CLOUD_PROJECT_ID, is_cloud=True)
             user = authenticator.authenticate(pat)
             st.session_state.authenticated = True
             st.session_state.user_email = user.email
             st.session_state.user_id = user.user_id
             st.session_state.dremio_pat = pat.strip()
+            store = memory()
+            if store:
+                store.upsert_user(user.user_id, user.email)
+                refresh_conversations()
             st.success(f"App desbloqueado para {user.email}.")
             st.rerun()
         except Exception as exc:
             st.error(f"Não consegui validar o PAT no Dremio: {exc}")
-
     st.info("Depois de desbloquear, escolha a fonte Dremio ou Planilha na barra lateral para iniciar o agente.")
     return False
 
@@ -681,7 +586,8 @@ def render_auth_gate() -> bool:
 def render_chat():
     st.title("📊 Fin BigData")
     st.caption("Bancada analítica assistida por Gemini. O agente consulta dados estruturados, não arquivo bruto no prompt.")
-
+    if st.session_state.get("conversation_id"):
+        st.caption(f"Conversa: `{st.session_state.conversation_id}`")
     if not st.session_state.agent:
         st.info("Escolha uma fonte de dados na barra lateral para iniciar o agente.")
         return
@@ -696,27 +602,37 @@ def render_chat():
         return
 
     st.session_state.messages.append({"role": "user", "content": user_input})
+    append_persistent_message("user", user_input)
     with st.chat_message("user"):
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
         status_box = st.empty()
-
         def update_status(message: str):
             status_box.caption(message)
-
         update_status("🚀 Iniciando análise")
         try:
             response = st.session_state.agent.chat(user_input, progress_callback=update_status)
         except Exception as exc:
             response = f"Erro ao processar pergunta: {exc}"
             update_status("❌ Erro ao processar pergunta")
-
         status_box.empty()
         st.markdown(response)
         render_download_buttons()
 
+    result = getattr(st.session_state.agent, "last_query_result", None)
     st.session_state.messages.append({"role": "assistant", "content": response})
+    append_persistent_message(
+        "assistant",
+        response,
+        sql=getattr(result, "sql_executed", None),
+        query_result_summary=result_summary(result),
+    )
+    if result:
+        update_conversation_state(
+            last_query_sql=result.sql_executed,
+            last_result_summary=result_summary(result),
+        )
 
 
 def main():
