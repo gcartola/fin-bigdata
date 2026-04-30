@@ -8,3 +8,4 @@ openpyxl
 pandas
 google-cloud-storage
 google-cloud-secret-manager
+google-cloud-firestore
