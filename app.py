@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from agent import Agent
+from auth import DremioPATAuthenticator
 from dremio_engine import DremioEngine
 from gcs_upload import create_signed_upload_url, get_gcs_hmac_credentials, get_upload_bucket
 from hybrid_engine import HybridEngine
@@ -41,6 +42,10 @@ def init_state():
         "dremio_selected_catalog": None,
         "dremio_selected_container": None,
         "dremio_selected_view": None,
+        "authenticated": False,
+        "user_email": None,
+        "user_id": None,
+        "dremio_pat": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -370,24 +375,16 @@ def _unique_view_display_map(views) -> dict[str, object]:
 
 def setup_dremio_ui():
     st.subheader("Fonte Dremio")
-    st.caption("Informe seu PAT e escolha catálogo, pasta e view.")
+    st.caption("Escolha catálogo, pasta e view com o PAT validado no desbloqueio do app.")
 
-    server_pat = os.getenv("DREMIO_PAT", "").strip()
-    use_server_pat = False
-    if server_pat:
-        use_server_pat = st.checkbox("Usar PAT de serviço configurado no servidor", value=False)
+    effective_pat = st.session_state.get("dremio_pat")
+    if not effective_pat:
+        st.info("Desbloqueie o app com seu PAT do Dremio para carregar as fontes.")
+        return
 
-    pat = ""
-    if not use_server_pat:
-        pat = st.text_input(
-            "Personal Access Token",
-            value="",
-            type="password",
-            placeholder="Cole aqui o seu PAT do Dremio",
-        )
-    effective_pat = server_pat if use_server_pat else pat
+    st.caption(f"Usuário Dremio: `{st.session_state.get('user_email')}`")
 
-    if st.button("Buscar catálogos", disabled=not effective_pat):
+    if st.button("Buscar catálogos"):
         try:
             engine = _create_dremio_engine(effective_pat)
             st.session_state.dremio_catalogs = engine.list_catalogs()
@@ -412,7 +409,7 @@ def setup_dremio_ui():
             st.session_state.dremio_selected_container = None
             st.session_state.dremio_selected_view = None
 
-        if st.button("Listar pastas", disabled=not effective_pat or not selected_catalog):
+        if st.button("Listar pastas", disabled=not selected_catalog):
             try:
                 engine = _create_dremio_engine(effective_pat)
                 st.session_state.dremio_containers = engine.list_child_containers(selected_catalog)
@@ -435,7 +432,7 @@ def setup_dremio_ui():
             st.session_state.dremio_views = []
             st.session_state.dremio_selected_view = None
 
-        if st.button("Carregar views da pasta", disabled=not effective_pat or not selected_container):
+        if st.button("Carregar views da pasta", disabled=not selected_container):
             try:
                 engine = _create_dremio_engine(effective_pat)
                 st.session_state.dremio_views = engine.list_datasets(selected_container, recursive=True)
@@ -477,7 +474,7 @@ def setup_dremio_ui():
 
         st.caption(f"{len(filtered_views)} de {len(views)} view(s) encontrada(s).")
 
-    if st.button("Conectar Dremio", type="primary", disabled=not effective_pat or not (selected_catalog or selected_view)):
+    if st.button("Conectar Dremio", type="primary", disabled=not (selected_catalog or selected_view)):
         try:
             if selected_view:
                 allowed = [selected_view]
@@ -538,6 +535,46 @@ def render_relationship_ui():
     st.caption("Exemplo: busque um contrato no Dremio; com nome/CPF encontrados, procure o cliente na planilha.")
 
 
+def reset_workspace(keep_auth: bool = True):
+    preserved = {}
+    if keep_auth:
+        preserved = {
+            "authenticated": st.session_state.get("authenticated"),
+            "user_email": st.session_state.get("user_email"),
+            "user_id": st.session_state.get("user_id"),
+            "dremio_pat": st.session_state.get("dremio_pat"),
+        }
+
+    for key in [
+        "engine",
+        "agent",
+        "messages",
+        "loaded_files",
+        "signed_upload",
+        "dremio_engine",
+        "spreadsheet_engine",
+        "dremio_loaded_files",
+        "spreadsheet_loaded_files",
+        "dremio_catalogs",
+        "dremio_containers",
+        "dremio_views",
+        "dremio_selected_catalog",
+        "dremio_selected_container",
+        "dremio_selected_view",
+    ]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+    if not keep_auth:
+        for key in ["authenticated", "user_email", "user_id", "dremio_pat"]:
+            if key in st.session_state:
+                del st.session_state[key]
+
+    init_state()
+    for key, value in preserved.items():
+        st.session_state[key] = value
+
+
 def render_sidebar():
     _, _, model = get_vertex_config()
 
@@ -547,6 +584,15 @@ def render_sidebar():
 
         st.markdown("### Agente")
         st.write(f"Modelo: `{model}`")
+
+        if st.session_state.get("authenticated"):
+            st.success("App desbloqueado")
+            st.caption(f"Usuário: `{st.session_state.get('user_email')}`")
+            if st.button("Trocar PAT / sair"):
+                reset_workspace(keep_auth=False)
+                st.rerun()
+        else:
+            st.warning("App bloqueado. Informe seu PAT para liberar o agente.")
 
         st.divider()
         setup_dremio_ui()
@@ -567,20 +613,69 @@ def render_sidebar():
             st.warning("Nenhuma engine ativa.")
 
         if st.button("Resetar sessão"):
-            st.session_state.engine = None
-            st.session_state.agent = None
-            st.session_state.messages = []
-            st.session_state.loaded_files = []
-            st.session_state.signed_upload = None
-            st.session_state.dremio_engine = None
-            st.session_state.spreadsheet_engine = None
-            st.session_state.dremio_loaded_files = []
-            st.session_state.spreadsheet_loaded_files = []
-            st.session_state.dremio_catalogs = []
-            st.session_state.dremio_containers = []
-            st.session_state.dremio_views = []
-            st.session_state.dremio_selected_view = None
+            reset_workspace(keep_auth=True)
             st.rerun()
+
+
+def render_auth_gate() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown(
+        """
+        <style>
+          [data-testid="stSidebar"] { filter: blur(1.5px); opacity: 0.72; }
+          .auth-card {
+            max-width: 560px;
+            margin: 8vh auto 0 auto;
+            padding: 28px;
+            border: 1px solid rgba(250, 250, 250, 0.16);
+            border-radius: 22px;
+            background: rgba(17, 24, 39, 0.78);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+          }
+          .auth-title { font-size: 32px; font-weight: 800; margin-bottom: 6px; }
+          .auth-subtitle { opacity: 0.76; margin-bottom: 18px; }
+        </style>
+        <div class="auth-card">
+          <div class="auth-title">Desbloquear Fin BigData</div>
+          <div class="auth-subtitle">
+            Use seu PAT do Dremio para validar permissões e identificar seu e-mail corporativo.
+            O token fica somente em memória nesta sessão.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("dremio_pat_unlock_form"):
+        pat = st.text_input(
+            "Personal Access Token do Dremio",
+            value="",
+            type="password",
+            placeholder="Cole aqui o seu PAT do Dremio",
+        )
+        submitted = st.form_submit_button("Desbloquear app", type="primary", use_container_width=True)
+
+    if submitted:
+        try:
+            authenticator = DremioPATAuthenticator(
+                host=DREMIO_CLOUD_HOST,
+                project_id=DREMIO_CLOUD_PROJECT_ID,
+                is_cloud=True,
+            )
+            user = authenticator.authenticate(pat)
+            st.session_state.authenticated = True
+            st.session_state.user_email = user.email
+            st.session_state.user_id = user.user_id
+            st.session_state.dremio_pat = pat.strip()
+            st.success(f"App desbloqueado para {user.email}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Não consegui validar o PAT no Dremio: {exc}")
+
+    st.info("Depois de desbloquear, escolha a fonte Dremio ou Planilha na barra lateral para iniciar o agente.")
+    return False
 
 
 def render_chat():
@@ -627,6 +722,8 @@ def render_chat():
 def main():
     init_state()
     render_sidebar()
+    if not render_auth_gate():
+        return
     render_chat()
 
 
