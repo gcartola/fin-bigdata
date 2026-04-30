@@ -163,23 +163,101 @@ def setup_local_spreadsheet_upload():
 def render_signed_upload_component(signed_url: str, gcs_uri: str):
     components.html(
         f"""
-        <div style="font-family: sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 12px;">
-          <p><strong>Upload direto para GCS</strong></p>
-          <input id="file" type="file" />
-          <button id="upload" style="margin-left: 8px;">Enviar para GCS</button>
-          <pre id="status" style="white-space: pre-wrap;"></pre>
+        <style>
+          .gcs-card {{
+            box-sizing: border-box;
+            width: 100%;
+            max-width: 100%;
+            border: 1px solid rgba(250, 250, 250, 0.28);
+            border-radius: 12px;
+            padding: 14px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f8fafc;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          }}
+          .gcs-title {{
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #f8fafc;
+          }}
+          .gcs-file {{
+            display: block;
+            width: 100%;
+            box-sizing: border-box;
+            color: #f8fafc;
+            font-size: 12px;
+            margin-bottom: 10px;
+          }}
+          .gcs-file::file-selector-button {{
+            border: 1px solid rgba(250, 250, 250, 0.28);
+            border-radius: 8px;
+            background: #111827;
+            color: #f8fafc;
+            padding: 7px 10px;
+            margin-right: 8px;
+            cursor: pointer;
+          }}
+          .gcs-button {{
+            width: 100%;
+            border: 0;
+            border-radius: 10px;
+            background: #ff4b4b;
+            color: white;
+            padding: 9px 10px;
+            font-weight: 700;
+            cursor: pointer;
+          }}
+          .gcs-button:disabled {{
+            opacity: 0.55;
+            cursor: not-allowed;
+          }}
+          .gcs-status {{
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 10px;
+            background: rgba(15, 23, 42, 0.9);
+            color: #e5e7eb;
+            font-size: 12px;
+            line-height: 1.35;
+            white-space: pre-wrap;
+            word-break: break-word;
+            min-height: 18px;
+          }}
+          .gcs-status.success {{
+            background: rgba(22, 101, 52, 0.35);
+            color: #bbf7d0;
+          }}
+          .gcs-status.error {{
+            background: rgba(127, 29, 29, 0.38);
+            color: #fecaca;
+          }}
+        </style>
+        <div class="gcs-card">
+          <div class="gcs-title">Upload direto para GCS</div>
+          <input id="file" class="gcs-file" type="file" />
+          <button id="upload" class="gcs-button">Enviar para GCS</button>
+          <div id="status" class="gcs-status">Selecione o arquivo e envie para o bucket.</div>
         </div>
         <script>
         const signedUrl = {signed_url!r};
         const gcsUri = {gcs_uri!r};
-        document.getElementById('upload').onclick = async () => {{
+        const uploadButton = document.getElementById('upload');
+        const status = document.getElementById('status');
+
+        function setStatus(text, cls) {{
+          status.className = 'gcs-status' + (cls ? ` ${{cls}}` : '');
+          status.textContent = text;
+        }}
+
+        uploadButton.onclick = async () => {{
           const file = document.getElementById('file').files[0];
-          const status = document.getElementById('status');
           if (!file) {{
-            status.textContent = 'Selecione um arquivo primeiro.';
+            setStatus('Selecione um arquivo primeiro.', 'error');
             return;
           }}
-          status.textContent = 'Enviando... não feche esta página.';
+          uploadButton.disabled = true;
+          setStatus('Enviando... não feche esta página.');
           try {{
             const response = await fetch(signedUrl, {{
               method: 'PUT',
@@ -189,14 +267,16 @@ def render_signed_upload_component(signed_url: str, gcs_uri: str):
             if (!response.ok) {{
               throw new Error(`HTTP ${{response.status}} ${{response.statusText}} ${{detail}}`);
             }}
-            status.textContent = `Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`;
+            setStatus(`Upload concluído. Agora clique em "Usar arquivo enviado" no app.\n${{gcsUri}}`, 'success');
           }} catch (err) {{
-            status.textContent = `Falha no upload: ${{err.message}}`;
+            setStatus(`Falha no upload: ${{err.message}}`, 'error');
+          }} finally {{
+            uploadButton.disabled = false;
           }}
         }};
         </script>
         """,
-        height=220,
+        height=245,
     )
 
 
