@@ -16,6 +16,28 @@ def set_browser_title():
     )
 
 
+def inject_sidebar_compact_css():
+    st.markdown(
+        """
+        <style>
+          [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding-top: 1.15rem;
+          }
+
+          [data-testid="stSidebar"] h1 {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+          }
+
+          [data-testid="stSidebar"] .block-container {
+            padding-top: 1rem;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def first_name_from_email(email: str | None) -> str:
     if not email or "@" not in email:
         return ""
@@ -31,14 +53,14 @@ def home_title() -> str:
 
 
 def render_sidebar_bigdados():
+    inject_sidebar_compact_css()
     _, _, model = base_app.get_vertex_config()
     with st.sidebar:
         st.title(APP_NAME)
-        st.caption("Análises de BigData")
+        st.caption("Análises de BigDados")
         st.markdown("### Agente")
         st.write(f"Modelo: `{model}`")
         if st.session_state.get("authenticated"):
-            st.success("App desbloqueado")
             st.caption(f"Usuário: `{st.session_state.get('user_email')}`")
             if st.button("Trocar PAT / sair"):
                 base_app.reset_workspace(keep_auth=False)
