@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections.abc import Callable
 
 from google import genai
@@ -77,6 +78,23 @@ def build_tools() -> list[types.Tool]:
     ]
 
 
+def sanitize_markdown(text: str) -> str:
+    """Remove pequenos vazamentos de HTML que aparecem como texto no chat.
+
+    O Streamlit renderiza markdown, mas o modelo às vezes devolve tags HTML
+    literais como <hr>. Em vez de deixar isso poluir a conversa persistida,
+    normalizamos para markdown limpo.
+    """
+    if not text:
+        return text
+    cleaned = text
+    cleaned = re.sub(r"(?i)<\s*hr\s*/?\s*>", "\n---\n", cleaned)
+    cleaned = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</?p\s*>", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def system_instruction(engine: AnalyticsEngine) -> str:
     return f"""Você é um analista de dados sênior conversando com um colega via chat.
 
@@ -107,6 +125,8 @@ REGRAS DE TRABALHO:
 9. Para busca por contrato, CPF, nome ou identificador específico, vá direto no
    filtro da view/tabela selecionada. Não faça varredura ampla se já existe uma
    fonte selecionada.
+10. Não use HTML nas respostas. Não use tags como <hr>, <br>, <p> ou similares.
+    Use apenas markdown puro.
 
 ESTILO:
 - Direto, sem rodeios. Você é colega, não assistente bajulador.
@@ -139,7 +159,7 @@ class Agent:
         self.conversation = []
         for message in messages[-max_messages:]:
             role = message.get("role")
-            content = (message.get("content") or "").strip()
+            content = sanitize_markdown((message.get("content") or "").strip())
             if role not in ("user", "assistant") or not content:
                 continue
             self.conversation.append(types.Content(role=role, parts=[types.Part(text=content)]))
@@ -224,6 +244,7 @@ class Agent:
                 for part in content.parts:
                     if part.text:
                         final_text += part.text
+                final_text = sanitize_markdown(final_text)
                 emit("✅ Resposta final pronta")
                 return final_text or "[Sem resposta de texto]"
 
