@@ -144,7 +144,9 @@ def activate_engine(engine, loaded: list[str], success_message: str, source_meta
         st.session_state.agent = agent
         st.session_state.loaded_files = loaded
         ensure_conversation()
-        update_conversation_state(active_sources=loaded, **(source_metadata or {}))
+        metadata = dict(source_metadata or {})
+        metadata.setdefault("active_sources", loaded)
+        update_conversation_state(**metadata)
         st.success(success_message)
 
 
@@ -423,7 +425,7 @@ def setup_dremio_ui():
             loaded = [loaded_label, f"{len(tables)} tabelas/views visíveis no Dremio"]
             st.session_state.dremio_engine = engine
             st.session_state.dremio_loaded_files = loaded
-            activate_engine(engine, loaded, "Dremio conectado e agente inicializado.", {"selected_dremio_view": selected_view, "active_sources": loaded})
+            activate_engine(engine, loaded, "Dremio conectado e agente inicializado.", {"selected_dremio_view": selected_view})
         except Exception as exc:
             st.error(f"Falha ao conectar no Dremio: {exc}")
 
@@ -445,7 +447,7 @@ def render_relationship_ui():
     if st.button("🔗 Ativar análise combinada", type="primary", use_container_width=True):
         hybrid = HybridEngine(st.session_state.dremio_engine, st.session_state.spreadsheet_engine)
         loaded = ["Modo combinado ativo: Dremio + Planilha", *st.session_state.get("dremio_loaded_files", []), *st.session_state.get("spreadsheet_loaded_files", [])]
-        activate_engine(hybrid, loaded, "Análise combinada ativada. Oriente o agente pelo chat sobre como relacionar as fontes.", {"active_sources": loaded})
+        activate_engine(hybrid, loaded, "Análise combinada ativada. Oriente o agente pelo chat sobre como relacionar as fontes.")
     st.caption("Exemplo: busque um contrato no Dremio; com nome/CPF encontrados, procure o cliente na planilha.")
 
 
