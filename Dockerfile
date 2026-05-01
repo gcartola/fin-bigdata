@@ -22,7 +22,7 @@ RUN mkdir -p data exports logs tmp
 
 EXPOSE 8080
 
-CMD streamlit run app.py \
+CMD streamlit run app_entry.py \
     --server.port=${PORT} \
     --server.address=0.0.0.0 \
     --server.headless=true \
