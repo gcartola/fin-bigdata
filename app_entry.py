@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 
 import app as base_app
 from auth import DremioPATAuthenticator
+from dremio_engine import DremioEngine
 
 APP_NAME = "BigDados"
 APP_CAPTION = "Bancada analítica para BigDados assistida por Agente Gemini"
@@ -23,12 +24,10 @@ def inject_sidebar_compact_css():
           [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             padding-top: 1.15rem;
           }
-
           [data-testid="stSidebar"] h1 {
             margin-top: 0 !important;
             padding-top: 0 !important;
           }
-
           [data-testid="stSidebar"] .block-container {
             padding-top: 1rem;
           }
@@ -36,6 +35,13 @@ def inject_sidebar_compact_css():
         """,
         unsafe_allow_html=True,
     )
+
+
+def phase1_state():
+    if "active_dremio_sources" not in st.session_state:
+        st.session_state.active_dremio_sources = []
+    if "show_source_manager" not in st.session_state:
+        st.session_state.show_source_manager = False
 
 
 def first_name_from_email(email: str | None) -> str:
@@ -49,44 +55,269 @@ def home_title() -> str:
     first_name = first_name_from_email(st.session_state.get("user_email"))
     if first_name:
         return f"Olá, {first_name}, o que vamos analisar agora?"
-    return f"Olá, o que vamos analisar agora?"
+    return "Olá, o que vamos analisar agora?"
+
+
+def source_name_from_path(path: str) -> str:
+    return base_app._display_path_tail(path, levels=1)
+
+
+def source_alias_from_name(name: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in name)
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned.strip("_") or "fonte"
+
+
+def add_dremio_source(path: str, name: str | None = None):
+    phase1_state()
+    name = name or source_name_from_path(path)
+    current = st.session_state.active_dremio_sources
+    if any(src.get("path") == path for src in current):
+        st.info(f"{name} já está na lista de fontes.")
+        return
+    current.append({
+        "type": "dremio_view",
+        "path": path,
+        "name": name,
+        "alias": source_alias_from_name(name),
+    })
+    st.session_state.active_dremio_sources = current
+    st.success(f"Adicionei {name} às fontes da análise.")
+
+
+def remove_dremio_source(path: str):
+    st.session_state.active_dremio_sources = [
+        src for src in st.session_state.get("active_dremio_sources", [])
+        if src.get("path") != path
+    ]
+
+
+def connect_dremio_sources():
+    sources = st.session_state.get("active_dremio_sources", [])
+    pat = st.session_state.get("dremio_pat")
+    if not pat:
+        st.error("Desbloqueie o app com seu PAT antes de conectar fontes.")
+        return
+    if not sources:
+        st.warning("Adicione pelo menos uma view Dremio antes de conectar.")
+        return
+
+    paths = [src["path"] for src in sources]
+    engine = DremioEngine(
+        base_app.DREMIO_CLOUD_HOST,
+        pat,
+        base_app.DREMIO_CLOUD_PROJECT_ID,
+        is_cloud=True,
+        allowed_paths=paths,
+    )
+    tables = engine.list_tables()
+    loaded = [f"Dremio · {len(paths)} view(s) selecionada(s)"] + [f"{src['name']} — {src['path']}" for src in sources]
+    st.session_state.dremio_engine = engine
+    st.session_state.dremio_loaded_files = loaded
+    base_app.activate_engine(
+        engine,
+        loaded,
+        f"Dremio conectado com {len(paths)} view(s).",
+        {
+            "selected_dremio_view": paths[0] if len(paths) == 1 else None,
+            "dremio_sources": sources,
+            "active_sources": loaded,
+        },
+    )
+    if len(tables) != len(paths):
+        st.caption(f"Aviso técnico: o engine expôs {len(tables)} tabela(s)/view(s) para {len(paths)} path(s) selecionado(s).")
+
+
+def render_dremio_source_picker():
+    st.markdown("#### Dremio")
+    st.caption("Adicione uma ou mais views ao ambiente analítico desta conversa.")
+    effective_pat = st.session_state.get("dremio_pat")
+    if not effective_pat:
+        st.info("Desbloqueie o app com seu PAT do Dremio para carregar as fontes.")
+        return
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        if st.button("Buscar catálogos", use_container_width=True, key="modal_buscar_catalogos"):
+            try:
+                engine = base_app._create_dremio_engine(effective_pat)
+                st.session_state.dremio_catalogs = engine.list_catalogs()
+                st.session_state.dremio_containers = []
+                st.session_state.dremio_views = []
+                st.session_state.dremio_selected_catalog = None
+                st.session_state.dremio_selected_container = None
+                st.session_state.dremio_selected_view = None
+                if not st.session_state.dremio_catalogs:
+                    st.warning("Nenhum catálogo visível para este PAT.")
+            except Exception as exc:
+                st.error(f"Falha ao buscar catálogos: {exc}")
+    with col_b:
+        st.caption(f"Usuário Dremio: `{st.session_state.get('user_email')}`")
+
+    catalogs = st.session_state.get("dremio_catalogs", [])
+    selected_catalog = None
+    if catalogs:
+        selected_catalog = st.selectbox("Catálogo/Workspace", catalogs, key="modal_dremio_catalog_select")
+        if selected_catalog != st.session_state.get("dremio_selected_catalog"):
+            st.session_state.dremio_selected_catalog = selected_catalog
+            st.session_state.dremio_containers = []
+            st.session_state.dremio_views = []
+            st.session_state.dremio_selected_container = None
+            st.session_state.dremio_selected_view = None
+        if st.button("Listar pastas", disabled=not selected_catalog, key="modal_listar_pastas"):
+            try:
+                engine = base_app._create_dremio_engine(effective_pat)
+                st.session_state.dremio_containers = engine.list_child_containers(selected_catalog)
+                st.session_state.dremio_views = []
+                if not st.session_state.dremio_containers:
+                    st.warning("Não encontrei pastas nesse catálogo.")
+            except Exception as exc:
+                st.error(f"Falha ao listar pastas: {exc}")
+
+    containers = st.session_state.get("dremio_containers", [])
+    selected_container = None
+    if containers:
+        container_map = base_app._unique_display_map(containers, levels=1)
+        container_options = ["(usar catálogo inteiro)"] + list(container_map.keys())
+        selected_container_label = st.selectbox("Pasta", container_options, key="modal_dremio_container_select")
+        selected_container = selected_catalog if selected_container_label == "(usar catálogo inteiro)" else container_map[selected_container_label]
+        if selected_container != st.session_state.get("dremio_selected_container"):
+            st.session_state.dremio_selected_container = selected_container
+            st.session_state.dremio_views = []
+            st.session_state.dremio_selected_view = None
+        if st.button("Carregar views da pasta", disabled=not selected_container, key="modal_carregar_views"):
+            try:
+                engine = base_app._create_dremio_engine(effective_pat)
+                st.session_state.dremio_views = engine.list_datasets(selected_container, recursive=True)
+                st.session_state.dremio_selected_view = None
+                if not st.session_state.dremio_views:
+                    st.warning("Não encontrei views nessa pasta.")
+            except Exception as exc:
+                st.error(f"Falha ao carregar views: {exc}")
+
+    views = st.session_state.get("dremio_views", [])
+    selected_view = None
+    selected_view_obj = None
+    if views:
+        view_search = st.text_input("Filtrar view", value="", placeholder="Digite o nome da view. Ex: INAD", key="modal_dremio_view_search")
+        query = view_search.strip().lower()
+        filtered_views = [view for view in views if not query or query in base_app._view_label(view).lower() or query in view.full_path.lower()]
+        if filtered_views:
+            view_map = base_app._unique_view_display_map(filtered_views)
+            selected_view_label = st.selectbox("Views encontradas", list(view_map.keys()), key="modal_dremio_view_select")
+            selected_view_obj = view_map[selected_view_label]
+            selected_view = selected_view_obj.full_path
+            st.session_state.dremio_selected_view = selected_view
+            st.caption(f"Selecionada: `{base_app._view_label(selected_view_obj)}`")
+            st.caption(f"Caminho técnico: `{selected_view}`")
+            if st.button("Adicionar view à análise", type="secondary", use_container_width=True, key="modal_add_view", disabled=not selected_view):
+                add_dremio_source(selected_view, base_app._view_label(selected_view_obj))
+        else:
+            st.info("Nenhuma view encontrada com esse filtro.")
+        st.caption(f"{len(filtered_views)} de {len(views)} view(s) encontrada(s).")
+
+
+def render_selected_sources():
+    phase1_state()
+    st.markdown("#### Fontes selecionadas")
+    sources = st.session_state.get("active_dremio_sources", [])
+    if not sources:
+        st.caption("Nenhuma view Dremio adicionada ainda.")
+        return
+
+    for idx, src in enumerate(sources, start=1):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(f"**{idx}. {src['name']}**")
+            st.caption(src["path"])
+        with col2:
+            if st.button("Remover", key=f"remove_dremio_source_{idx}"):
+                remove_dremio_source(src["path"])
+                st.rerun()
+
+    if st.button("Conectar fontes selecionadas", type="primary", use_container_width=True, key="connect_selected_sources"):
+        connect_dremio_sources()
+
+
+def render_source_manager_content():
+    phase1_state()
+    tab_dremio, tab_planilha, tab_conectadas = st.tabs(["Dremio", "Planilha", "Fontes conectadas"])
+    with tab_dremio:
+        render_dremio_source_picker()
+    with tab_planilha:
+        st.caption("Planilhas continuam disponíveis aqui. A multi-view Dremio é o foco desta fase.")
+        base_app.setup_spreadsheet_ui()
+    with tab_conectadas:
+        render_selected_sources()
+
+
+def open_source_manager():
+    if hasattr(st, "dialog"):
+        @st.dialog("Gerenciar fontes de dados", width="large")
+        def source_dialog():
+            render_source_manager_content()
+        source_dialog()
+    else:
+        st.session_state.show_source_manager = not st.session_state.get("show_source_manager", False)
+
+
+def render_source_summary_sidebar():
+    phase1_state()
+    st.markdown("### Fontes")
+    sources = st.session_state.get("active_dremio_sources", [])
+    if sources and st.session_state.get("dremio_engine"):
+        st.success(f"Dremio · {len(sources)} view(s)")
+        for src in sources[:3]:
+            st.caption(src["name"])
+        if len(sources) > 3:
+            st.caption(f"+ {len(sources) - 3} outra(s)")
+    elif st.session_state.get("engine"):
+        st.success(st.session_state.engine.engine_name)
+        for item in st.session_state.get("loaded_files", [])[:3]:
+            st.caption(item)
+    else:
+        st.warning("Nenhuma fonte ativa.")
+
+    if st.button("Gerenciar fontes", type="primary", use_container_width=True):
+        open_source_manager()
+
+    if st.session_state.get("show_source_manager") and not hasattr(st, "dialog"):
+        with st.expander("Gerenciar fontes de dados", expanded=True):
+            render_source_manager_content()
 
 
 def render_sidebar_bigdados():
     inject_sidebar_compact_css()
+    phase1_state()
     _, _, model = base_app.get_vertex_config()
     with st.sidebar:
         st.title(APP_NAME)
         st.caption("Análises de BigDados")
-        st.markdown("### Agente")
-        st.write(f"Modelo: `{model}`")
+        st.caption(f"Modelo: `{model}`")
+
         if st.session_state.get("authenticated"):
             st.caption(f"Usuário: `{st.session_state.get('user_email')}`")
-            if st.button("Trocar PAT / sair"):
-                base_app.reset_workspace(keep_auth=False)
-                st.rerun()
         else:
             st.warning("App bloqueado. Informe seu PAT para liberar o agente.")
+
         st.divider()
-        base_app.setup_dremio_ui()
-        st.divider()
-        base_app.setup_spreadsheet_ui()
-        st.divider()
-        base_app.render_relationship_ui()
-        st.divider()
-        st.markdown("### Estado")
-        if st.session_state.engine:
-            st.success(st.session_state.engine.engine_name)
-            for item in st.session_state.loaded_files:
-                st.caption(item)
-        else:
-            st.warning("Nenhuma engine ativa.")
-        if st.button("Resetar sessão"):
-            base_app.reset_workspace(keep_auth=True)
-            st.rerun()
+        render_source_summary_sidebar()
+
         if st.session_state.get("authenticated"):
             st.divider()
             base_app.render_conversation_sidebar()
+
+        st.divider()
+        st.markdown("### Sessão")
+        if st.button("Nova análise", use_container_width=True):
+            base_app.reset_workspace(keep_auth=True)
+            st.session_state.active_dremio_sources = []
+            st.rerun()
+        if st.session_state.get("authenticated") and st.button("Trocar PAT / sair", use_container_width=True):
+            base_app.reset_workspace(keep_auth=False)
+            st.session_state.active_dremio_sources = []
+            st.rerun()
 
 
 def render_auth_gate_bigdados() -> bool:
@@ -96,90 +327,25 @@ def render_auth_gate_bigdados() -> bool:
     st.markdown(
         f"""
         <style>
-          [data-testid="stSidebar"] {{
-            filter: blur(1.8px);
-            opacity: 0.56;
-          }}
-
-          .bigdados-auth-shell {{
-            max-width: 620px;
-            margin: 9vh auto 0 auto;
-            display: flex;
-            flex-direction: column;
-            gap: 22px;
-          }}
-
-          .bigdados-auth-card {{
-            padding: 30px 34px;
-            border-radius: 24px;
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            background: rgba(255, 255, 255, 0.94);
-            color: #0f172a;
-            box-shadow: 0 26px 90px rgba(15, 23, 42, 0.16);
-          }}
-
-          .bigdados-auth-title {{
-            font-size: 30px;
-            line-height: 1.16;
-            font-weight: 850;
-            letter-spacing: -0.03em;
-            margin-bottom: 12px;
-          }}
-
-          .bigdados-auth-subtitle {{
-            color: #475569;
-            font-size: 15px;
-            line-height: 1.55;
-          }}
-
-          div[data-testid="stForm"] {{
-            max-width: 620px;
-            margin: 22px auto 0 auto;
-            padding: 18px 20px 14px 20px;
-            border-radius: 16px;
-            border: 1px solid rgba(148, 163, 184, 0.34);
-            background: rgba(255, 255, 255, 0.88);
-            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
-          }}
-
-          div[data-testid="stForm"] button[kind="primary"] {{
-            border-radius: 10px;
-            margin-top: 8px;
-          }}
-
-          div[data-testid="stForm"] input {{
-            border-radius: 10px;
-          }}
-
-          .stAlert {{
-            max-width: 620px;
-            margin-left: auto;
-            margin-right: auto;
-          }}
-
+          [data-testid="stSidebar"] {{ filter: blur(1.8px); opacity: 0.56; }}
+          .bigdados-auth-shell {{ max-width: 620px; margin: 9vh auto 0 auto; display: flex; flex-direction: column; gap: 22px; }}
+          .bigdados-auth-card {{ padding: 30px 34px; border-radius: 24px; border: 1px solid rgba(148, 163, 184, 0.28); background: rgba(255, 255, 255, 0.94); color: #0f172a; box-shadow: 0 26px 90px rgba(15, 23, 42, 0.16); }}
+          .bigdados-auth-title {{ font-size: 30px; line-height: 1.16; font-weight: 850; letter-spacing: -0.03em; margin-bottom: 12px; }}
+          .bigdados-auth-subtitle {{ color: #475569; font-size: 15px; line-height: 1.55; }}
+          div[data-testid="stForm"] {{ max-width: 620px; margin: 22px auto 0 auto; padding: 18px 20px 14px 20px; border-radius: 16px; border: 1px solid rgba(148, 163, 184, 0.34); background: rgba(255, 255, 255, 0.88); box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08); }}
+          div[data-testid="stForm"] button[kind="primary"] {{ border-radius: 10px; margin-top: 8px; }}
+          div[data-testid="stForm"] input {{ border-radius: 10px; }}
+          .stAlert {{ max-width: 620px; margin-left: auto; margin-right: auto; }}
           @media (prefers-color-scheme: dark) {{
-            .bigdados-auth-card {{
-              background: rgba(15, 23, 42, 0.88);
-              color: #f8fafc;
-              border-color: rgba(148, 163, 184, 0.24);
-              box-shadow: 0 28px 90px rgba(0, 0, 0, 0.38);
-            }}
+            .bigdados-auth-card {{ background: rgba(15, 23, 42, 0.88); color: #f8fafc; border-color: rgba(148, 163, 184, 0.24); box-shadow: 0 28px 90px rgba(0, 0, 0, 0.38); }}
             .bigdados-auth-subtitle {{ color: #cbd5e1; }}
-            div[data-testid="stForm"] {{
-              background: rgba(15, 23, 42, 0.72);
-              border-color: rgba(148, 163, 184, 0.24);
-              box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
-            }}
+            div[data-testid="stForm"] {{ background: rgba(15, 23, 42, 0.72); border-color: rgba(148, 163, 184, 0.24); box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28); }}
           }}
         </style>
-
         <div class="bigdados-auth-shell">
           <div class="bigdados-auth-card">
             <div class="bigdados-auth-title">Desbloquear {APP_NAME}</div>
-            <div class="bigdados-auth-subtitle">
-              Use seu PAT do Dremio para validar permissões e identificar seu e-mail corporativo.
-              O token fica somente em memória nesta sessão.
-            </div>
+            <div class="bigdados-auth-subtitle">Use seu PAT do Dremio para validar permissões e identificar seu e-mail corporativo. O token fica somente em memória nesta sessão.</div>
           </div>
         </div>
         """,
@@ -187,21 +353,12 @@ def render_auth_gate_bigdados() -> bool:
     )
 
     with st.form("dremio_pat_unlock_form"):
-        pat = st.text_input(
-            "Personal Access Token do Dremio",
-            value="",
-            type="password",
-            placeholder="Cole aqui o seu PAT do Dremio",
-        )
+        pat = st.text_input("Personal Access Token do Dremio", value="", type="password", placeholder="Cole aqui o seu PAT do Dremio")
         submitted = st.form_submit_button("Desbloquear app", type="primary", use_container_width=True)
 
     if submitted:
         try:
-            authenticator = DremioPATAuthenticator(
-                base_app.DREMIO_CLOUD_HOST,
-                base_app.DREMIO_CLOUD_PROJECT_ID,
-                is_cloud=True,
-            )
+            authenticator = DremioPATAuthenticator(base_app.DREMIO_CLOUD_HOST, base_app.DREMIO_CLOUD_PROJECT_ID, is_cloud=True)
             user = authenticator.authenticate(pat)
             st.session_state.authenticated = True
             st.session_state.user_email = user.email
@@ -228,9 +385,6 @@ def render_chat_with_history_first():
     if st.session_state.get("conversation_id"):
         st.caption(f"Conversa: `{st.session_state.conversation_id}`")
 
-    # Histórico persistido é parte do workspace e deve aparecer mesmo antes de
-    # reconectar uma fonte/engine. Antes o app retornava cedo quando não havia
-    # agent ativo, deixando a conversa carregada em branco após logout/login.
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -282,8 +436,6 @@ def render_chat_with_history_first():
             last_result_summary=base_app.result_summary(result),
         )
 
-    # A sidebar é renderizada antes do chat. Força atualização para a conversa
-    # recém-criada/atualizada aparecer imediatamente no menu lateral.
     st.rerun()
 
 
