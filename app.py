@@ -1,5 +1,7 @@
 import os
 import tempfile
+import uuid
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -50,6 +52,8 @@ def init_state():
         "memory_error": None,
         "conversation_id": None,
         "saved_conversations": [],
+        "local_conversations": [],
+        "pending_source_metadata": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -63,6 +67,14 @@ def get_vertex_config():
     return project_id, location, model
 
 
+def build_conversation_title(user_input: str | None = None) -> str:
+    text = (user_input or "").strip().replace("\n", " ")
+    text = " ".join(text.split())
+    if not text:
+        return f"Nova análise · {datetime.now().strftime('%d/%m %H:%M')}"
+    return text[:60].rstrip(" .,;:-") + ("..." if len(text) > 60 else "")
+
+
 def memory():
     if st.session_state.get("memory_store") or st.session_state.get("memory_error"):
         return st.session_state.get("memory_store")
@@ -74,48 +86,96 @@ def memory():
     return st.session_state.get("memory_store")
 
 
+def local_conversation(conversation_id: str, title: str) -> dict:
+    return {
+        "id": conversation_id,
+        "title": title,
+        "user_id": st.session_state.get("user_id"),
+        "status": "local",
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def upsert_local_conversation(conversation_id: str, title: str | None = None):
+    conversations = st.session_state.get("local_conversations", [])
+    found = False
+    for conv in conversations:
+        if conv.get("id") == conversation_id:
+            if title:
+                conv["title"] = title
+            conv["updated_at"] = datetime.now().isoformat()
+            found = True
+            break
+    if not found:
+        conversations.insert(0, local_conversation(conversation_id, title or "Nova análise"))
+    st.session_state.local_conversations = conversations
+
+
 def refresh_conversations():
     store = memory()
     user_id = st.session_state.get("user_id")
-    if store and user_id:
-        st.session_state.saved_conversations = store.list_conversations(user_id)
-    else:
-        st.session_state.saved_conversations = []
+    remote = store.list_conversations(user_id) if store and user_id else []
+    local = st.session_state.get("local_conversations", [])
+    remote_ids = {conv.get("id") for conv in remote}
+    st.session_state.saved_conversations = remote + [conv for conv in local if conv.get("id") not in remote_ids]
 
 
-def ensure_conversation(title: str = "Nova conversa") -> str | None:
+def ensure_conversation(title: str | None = None) -> str:
     if st.session_state.get("conversation_id"):
         return st.session_state.conversation_id
+
+    title = title or build_conversation_title()
+    metadata = dict(st.session_state.get("pending_source_metadata") or {})
     store = memory()
     user_id = st.session_state.get("user_id")
-    if not store or not user_id:
-        return None
-    conversation_id = store.create_conversation(user_id=user_id, title=title)
+    conversation_id = None
+
+    if store and user_id:
+        conversation_id = store.create_conversation(user_id=user_id, title=title, metadata=metadata)
+
+    if not conversation_id:
+        conversation_id = f"local-{uuid.uuid4()}"
+        upsert_local_conversation(conversation_id, title)
+
     st.session_state.conversation_id = conversation_id
     refresh_conversations()
     return conversation_id
 
 
 def append_persistent_message(role: str, content: str, **metadata):
-    conversation_id = ensure_conversation(title=(content[:48] if role == "user" else "Nova conversa"))
+    title = build_conversation_title(content) if role == "user" else None
+    conversation_id = ensure_conversation(title=title)
     store = memory()
-    if store and conversation_id:
+    if store and conversation_id and not str(conversation_id).startswith("local-"):
         store.append_message(conversation_id, role, content, **metadata)
+    else:
+        upsert_local_conversation(conversation_id, title)
+    refresh_conversations()
 
 
 def update_conversation_state(**metadata):
-    store = memory()
+    pending = dict(st.session_state.get("pending_source_metadata") or {})
+    pending.update({key: value for key, value in metadata.items() if value is not None})
+    st.session_state.pending_source_metadata = pending
+
     conversation_id = st.session_state.get("conversation_id")
-    if store and conversation_id:
+    if not conversation_id:
+        return
+
+    store = memory()
+    if store and not str(conversation_id).startswith("local-"):
         store.update_conversation(conversation_id, **metadata)
-        refresh_conversations()
+    else:
+        upsert_local_conversation(conversation_id)
+    refresh_conversations()
 
 
 def load_conversation(conversation_id: str):
     store = memory()
-    if not store:
-        return
-    messages = store.get_messages(conversation_id, limit=50)
+    messages = []
+    if store and not str(conversation_id).startswith("local-"):
+        messages = store.get_messages(conversation_id, limit=50)
+
     st.session_state.conversation_id = conversation_id
     st.session_state.messages = [
         {"role": m.get("role"), "content": m.get("content", "")}
@@ -143,7 +203,6 @@ def activate_engine(engine, loaded: list[str], success_message: str, source_meta
         st.session_state.engine = engine
         st.session_state.agent = agent
         st.session_state.loaded_files = loaded
-        ensure_conversation()
         metadata = dict(source_metadata or {})
         metadata.setdefault("active_sources", loaded)
         update_conversation_state(**metadata)
@@ -454,16 +513,16 @@ def render_relationship_ui():
 def reset_workspace(keep_auth: bool = True):
     preserved = {}
     if keep_auth:
-        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations"]:
+        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations", "local_conversations"]:
             preserved[key] = st.session_state.get(key)
     for key in [
         "engine", "agent", "messages", "loaded_files", "signed_upload", "dremio_engine", "spreadsheet_engine",
         "dremio_loaded_files", "spreadsheet_loaded_files", "dremio_catalogs", "dremio_containers", "dremio_views",
-        "dremio_selected_catalog", "dremio_selected_container", "dremio_selected_view",
+        "dremio_selected_catalog", "dremio_selected_container", "dremio_selected_view", "pending_source_metadata",
     ]:
         st.session_state.pop(key, None)
     if not keep_auth:
-        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations"]:
+        for key in ["authenticated", "user_email", "user_id", "dremio_pat", "memory_store", "memory_error", "conversation_id", "saved_conversations", "local_conversations"]:
             st.session_state.pop(key, None)
     init_state()
     for key, value in preserved.items():
@@ -475,40 +534,36 @@ def new_conversation():
     st.session_state.messages = []
     if st.session_state.get("agent"):
         st.session_state.agent.load_history([])
-    ensure_conversation()
     st.rerun()
 
 
 def render_conversation_sidebar():
     st.markdown("### Conversas")
-    st.caption("Abra uma conversa salva depois de conectar uma fonte, ou comece uma nova análise.")
-    if st.session_state.get("memory_error"):
-        st.caption(f"Memória persistente indisponível: {st.session_state.memory_error}")
-        return
-    if not memory():
-        st.caption("Memória persistente desativada.")
-        return
+    st.caption("As conversas são criadas automaticamente na primeira pergunta.")
     if st.button("Nova conversa", use_container_width=True):
         new_conversation()
+
     refresh_conversations()
     conversations = st.session_state.get("saved_conversations", [])
     if not conversations:
-        st.caption("Nenhuma conversa salva ainda.")
+        if st.session_state.get("memory_error"):
+            st.caption("Memória persistente indisponível; a conversa atual fica só nesta sessão.")
+        else:
+            st.caption("Nenhuma conversa iniciada ainda.")
         return
-    labels = []
-    id_by_label = {}
-    for conv in conversations:
-        title = conv.get("title") or "Conversa sem título"
-        suffix = conv.get("id", "")[:8]
-        label = f"{title[:42]} · {suffix}"
-        labels.append(label)
-        id_by_label[label] = conv.get("id")
+
     current = st.session_state.get("conversation_id")
-    current_label = next((label for label, cid in id_by_label.items() if cid == current), labels[0])
-    selected = st.selectbox("Abrir conversa", labels, index=labels.index(current_label), key="conversation_select")
-    if id_by_label[selected] != current:
-        load_conversation(id_by_label[selected])
-        st.rerun()
+    for conv in conversations:
+        conv_id = conv.get("id")
+        title = conv.get("title") or "Conversa sem título"
+        is_current = conv_id == current
+        label = f"{'✅ ' if is_current else ''}{title[:52]}"
+        if st.button(label, key=f"open_conversation_{conv_id}", use_container_width=True, disabled=is_current):
+            load_conversation(conv_id)
+            st.rerun()
+
+    if st.session_state.get("memory_error"):
+        st.caption("Firestore indisponível. Persistência real será retomada quando a API estiver ativa.")
 
 
 def render_sidebar():
