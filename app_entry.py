@@ -93,15 +93,15 @@ def remove_dremio_source(path: str):
     ]
 
 
-def connect_dremio_sources():
+def connect_dremio_sources() -> bool:
     sources = st.session_state.get("active_dremio_sources", [])
     pat = st.session_state.get("dremio_pat")
     if not pat:
         st.error("Desbloqueie o app com seu PAT antes de conectar fontes.")
-        return
+        return False
     if not sources:
         st.warning("Adicione pelo menos uma view Dremio antes de conectar.")
-        return
+        return False
 
     paths = [src["path"] for src in sources]
     engine = DremioEngine(
@@ -127,6 +127,7 @@ def connect_dremio_sources():
     )
     if len(tables) != len(paths):
         st.caption(f"Aviso técnico: o engine expôs {len(tables)} tabela(s)/view(s) para {len(paths)} path(s) selecionado(s).")
+    return True
 
 
 def render_dremio_source_picker():
@@ -237,7 +238,9 @@ def render_selected_sources():
                 st.rerun()
 
     if st.button("Conectar fontes selecionadas", type="primary", use_container_width=True, key="connect_selected_sources"):
-        connect_dremio_sources()
+        if connect_dremio_sources():
+            st.session_state.show_source_manager = False
+            st.rerun()
 
 
 def render_source_manager_content():
