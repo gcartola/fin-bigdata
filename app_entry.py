@@ -1,10 +1,33 @@
 import streamlit as st
+import streamlit.components.v1 as components
 
 import app as base_app
 from auth import DremioPATAuthenticator
 
 APP_NAME = "BigDados"
-APP_CAPTION = "Bancada analítica assistida por Gemini. O agente consulta dados estruturados, não arquivo bruto no prompt."
+APP_CAPTION = "Bancada analítica para BigDados assistida por Agente Gemini"
+NO_SOURCE_MESSAGE = "Escolha suas fontes de dados para iniciar ou continuar uma conversa"
+
+
+def set_browser_title():
+    components.html(
+        f"<script>window.parent.document.title = {APP_NAME!r};</script>",
+        height=0,
+    )
+
+
+def first_name_from_email(email: str | None) -> str:
+    if not email or "@" not in email:
+        return ""
+    first = email.split("@", 1)[0].split(".", 1)[0].strip()
+    return first[:1].upper() + first[1:].lower() if first else ""
+
+
+def home_title() -> str:
+    first_name = first_name_from_email(st.session_state.get("user_email"))
+    if first_name:
+        return f"Olá, {first_name}, o que vamos analisar agora?"
+    return f"Olá, o que vamos analisar agora?"
 
 
 def render_sidebar_bigdados():
@@ -176,7 +199,8 @@ def render_auth_gate_bigdados() -> bool:
 
 
 def render_chat_with_history_first():
-    st.title(f"📊 {APP_NAME}")
+    set_browser_title()
+    st.title(f"📊 {home_title()}")
     st.caption(APP_CAPTION)
 
     if st.session_state.get("conversation_id"):
@@ -190,7 +214,7 @@ def render_chat_with_history_first():
             st.markdown(msg["content"])
 
     if not st.session_state.agent:
-        st.info("Escolha uma fonte de dados na barra lateral para continuar esta conversa com o agente.")
+        st.info(NO_SOURCE_MESSAGE)
         return
 
     user_input = st.chat_input("Pergunte algo sobre os dados...")
