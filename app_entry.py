@@ -37,9 +37,13 @@ def inject_sidebar_compact_css():
     )
 
 
-def phase1_state():
+def phase_state():
     if "active_dremio_sources" not in st.session_state:
         st.session_state.active_dremio_sources = []
+    if "source_relationships" not in st.session_state:
+        st.session_state.source_relationships = []
+    if "source_columns_by_path" not in st.session_state:
+        st.session_state.source_columns_by_path = {}
     if "show_source_manager" not in st.session_state:
         st.session_state.show_source_manager = False
 
@@ -69,8 +73,15 @@ def source_alias_from_name(name: str) -> str:
     return cleaned.strip("_") or "fonte"
 
 
+def find_source(path: str) -> dict | None:
+    for source in st.session_state.get("active_dremio_sources", []):
+        if source.get("path") == path:
+            return source
+    return None
+
+
 def add_dremio_source(path: str, name: str | None = None):
-    phase1_state()
+    phase_state()
     name = name or source_name_from_path(path)
     current = st.session_state.active_dremio_sources
     if any(src.get("path") == path for src in current):
@@ -91,9 +102,152 @@ def remove_dremio_source(path: str):
         src for src in st.session_state.get("active_dremio_sources", [])
         if src.get("path") != path
     ]
+    st.session_state.source_relationships = [
+        rel for rel in st.session_state.get("source_relationships", [])
+        if rel.get("left_path") != path and rel.get("right_path") != path
+    ]
+    persist_relationships()
+
+
+def relationship_label(rel: dict) -> str:
+    return (
+        f"{rel.get('left_name')}.{rel.get('left_column')} "
+        f"= {rel.get('right_name')}.{rel.get('right_column')}"
+    )
+
+
+def build_agent_context() -> str:
+    sources = st.session_state.get("active_dremio_sources", [])
+    relationships = st.session_state.get("source_relationships", [])
+    if not sources and not relationships:
+        return ""
+
+    lines = [
+        "\n\nCONTEXTO DO WORKSPACE BIGDADOS:",
+        "As fontes abaixo foram selecionadas pelo usuário para esta conversa.",
+    ]
+    if sources:
+        lines.append("\nFontes ativas:")
+        for src in sources:
+            lines.append(f"- alias `{src.get('alias')}` | nome `{src.get('name')}` | path {src.get('path')}")
+
+    if relationships:
+        lines.append("\nRelacionamentos conhecidos definidos pelo usuário:")
+        for rel in relationships:
+            lines.append(
+                f"- `{rel.get('left_name')}`.`{rel.get('left_column')}` "
+                f"= `{rel.get('right_name')}`.`{rel.get('right_column')}` "
+                f"(confiança: {rel.get('confidence', 'manual')})"
+            )
+        lines.append(
+            "\nQuando o usuário pedir análise cruzada entre fontes, use esses relacionamentos "
+            "como chaves preferenciais. Ainda assim, descreva e amostre as tabelas antes de montar SQL. "
+            "Se a junção puder duplicar linhas, avise e prefira validar contagens/amostras antes de concluir."
+        )
+    return "\n".join(lines)
+
+
+def apply_agent_workspace_context():
+    agent = st.session_state.get("agent")
+    if not agent:
+        return
+    if not hasattr(agent, "base_system"):
+        agent.base_system = agent.system
+    agent.system = agent.base_system + build_agent_context()
+
+
+def persist_relationships():
+    relationships = st.session_state.get("source_relationships", [])
+    base_app.update_conversation_state(relationships=relationships)
+    apply_agent_workspace_context()
+
+
+def get_dremio_engine_for_metadata() -> DremioEngine | None:
+    pat = st.session_state.get("dremio_pat")
+    if not pat:
+        return None
+    engine = st.session_state.get("dremio_engine")
+    if engine:
+        return engine
+    paths = [src["path"] for src in st.session_state.get("active_dremio_sources", [])]
+    return DremioEngine(
+        base_app.DREMIO_CLOUD_HOST,
+        pat,
+        base_app.DREMIO_CLOUD_PROJECT_ID,
+        is_cloud=True,
+        allowed_paths=paths,
+    )
+
+
+def load_columns_for_source(path: str) -> list[str]:
+    phase_state()
+    cache = st.session_state.source_columns_by_path
+    if path in cache:
+        return cache[path]
+    engine = get_dremio_engine_for_metadata()
+    if not engine:
+        return []
+    info = engine.describe_table(path)
+    columns = [col.get("name") for col in info.columns if col.get("name")]
+    cache[path] = columns
+    st.session_state.source_columns_by_path = cache
+    return columns
+
+
+def load_all_source_columns():
+    for source in st.session_state.get("active_dremio_sources", []):
+        load_columns_for_source(source["path"])
+
+
+def add_relationship(left_path: str, left_column: str, right_path: str, right_column: str):
+    if not left_path or not right_path or left_path == right_path:
+        st.warning("Escolha duas fontes diferentes para criar o relacionamento.")
+        return
+    if not left_column or not right_column:
+        st.warning("Escolha as colunas dos dois lados do relacionamento.")
+        return
+
+    left = find_source(left_path)
+    right = find_source(right_path)
+    if not left or not right:
+        st.error("Não encontrei uma das fontes selecionadas.")
+        return
+
+    relationship = {
+        "left_path": left_path,
+        "left_name": left["name"],
+        "left_alias": left["alias"],
+        "left_column": left_column,
+        "right_path": right_path,
+        "right_name": right["name"],
+        "right_alias": right["alias"],
+        "right_column": right_column,
+        "confidence": "manual",
+    }
+    existing = st.session_state.get("source_relationships", [])
+    signature = (left_path, left_column, right_path, right_column)
+    reverse_signature = (right_path, right_column, left_path, left_column)
+    for rel in existing:
+        rel_signature = (rel.get("left_path"), rel.get("left_column"), rel.get("right_path"), rel.get("right_column"))
+        if rel_signature in (signature, reverse_signature):
+            st.info("Esse relacionamento já existe.")
+            return
+    existing.append(relationship)
+    st.session_state.source_relationships = existing
+    persist_relationships()
+    st.success(f"Relacionamento criado: {relationship_label(relationship)}")
+
+
+def remove_relationship(index: int):
+    relationships = st.session_state.get("source_relationships", [])
+    if 0 <= index < len(relationships):
+        relationships.pop(index)
+        st.session_state.source_relationships = relationships
+        persist_relationships()
 
 
 def connect_dremio_sources() -> bool:
+    phase_state()
     sources = st.session_state.get("active_dremio_sources", [])
     pat = st.session_state.get("dremio_pat")
     if not pat:
@@ -122,9 +276,11 @@ def connect_dremio_sources() -> bool:
         {
             "selected_dremio_view": paths[0] if len(paths) == 1 else None,
             "dremio_sources": sources,
+            "relationships": st.session_state.get("source_relationships", []),
             "active_sources": loaded,
         },
     )
+    apply_agent_workspace_context()
     if len(tables) != len(paths):
         st.caption(f"Aviso técnico: o engine expôs {len(tables)} tabela(s)/view(s) para {len(paths)} path(s) selecionado(s).")
     return True
@@ -198,8 +354,6 @@ def render_dremio_source_picker():
                 st.error(f"Falha ao carregar views: {exc}")
 
     views = st.session_state.get("dremio_views", [])
-    selected_view = None
-    selected_view_obj = None
     if views:
         view_search = st.text_input("Filtrar view", value="", placeholder="Digite o nome da view. Ex: INAD", key="modal_dremio_view_search")
         query = view_search.strip().lower()
@@ -220,7 +374,7 @@ def render_dremio_source_picker():
 
 
 def render_selected_sources():
-    phase1_state()
+    phase_state()
     st.markdown("#### Fontes selecionadas")
     sources = st.session_state.get("active_dremio_sources", [])
     if not sources:
@@ -243,9 +397,66 @@ def render_selected_sources():
             st.rerun()
 
 
+def render_relationship_manager():
+    phase_state()
+    st.markdown("#### Relacionamentos")
+    sources = st.session_state.get("active_dremio_sources", [])
+    if len(sources) < 2:
+        st.info("Adicione pelo menos duas views Dremio para criar um relacionamento.")
+        return
+
+    if st.button("Carregar colunas das fontes", use_container_width=True, key="load_relationship_columns"):
+        try:
+            load_all_source_columns()
+            st.success("Colunas carregadas.")
+        except Exception as exc:
+            st.error(f"Falha ao carregar colunas: {exc}")
+
+    source_options = {f"{src['name']} · {idx}": src for idx, src in enumerate(sources, start=1)}
+    left_label = st.selectbox("Fonte esquerda", list(source_options.keys()), key="relationship_left_source")
+    right_label = st.selectbox("Fonte direita", list(source_options.keys()), key="relationship_right_source")
+    left = source_options[left_label]
+    right = source_options[right_label]
+
+    left_columns = load_columns_for_source(left["path"])
+    right_columns = load_columns_for_source(right["path"])
+
+    col1, col2 = st.columns(2)
+    with col1:
+        left_column = st.selectbox("Coluna esquerda", left_columns or [""], key="relationship_left_column")
+    with col2:
+        right_column = st.selectbox("Coluna direita", right_columns or [""], key="relationship_right_column")
+
+    if st.button("Criar relacionamento", type="primary", use_container_width=True, key="create_relationship"):
+        add_relationship(left["path"], left_column, right["path"], right_column)
+        st.rerun()
+
+    st.divider()
+    relationships = st.session_state.get("source_relationships", [])
+    if not relationships:
+        st.caption("Nenhum relacionamento definido ainda.")
+        return
+
+    st.markdown("##### Relacionamentos salvos")
+    for idx, rel in enumerate(relationships):
+        col_a, col_b = st.columns([4, 1])
+        with col_a:
+            st.markdown(f"**{relationship_label(rel)}**")
+            st.caption("Confiança: manual")
+        with col_b:
+            if st.button("Remover", key=f"remove_relationship_{idx}"):
+                remove_relationship(idx)
+                st.rerun()
+
+
 def render_source_manager_content():
-    phase1_state()
-    tab_dremio, tab_planilha, tab_conectadas = st.tabs(["Dremio", "Planilha", "Fontes conectadas"])
+    phase_state()
+    tab_dremio, tab_planilha, tab_conectadas, tab_relacionamentos = st.tabs([
+        "Dremio",
+        "Planilha",
+        "Fontes conectadas",
+        "Relacionamentos",
+    ])
     with tab_dremio:
         render_dremio_source_picker()
     with tab_planilha:
@@ -253,6 +464,8 @@ def render_source_manager_content():
         base_app.setup_spreadsheet_ui()
     with tab_conectadas:
         render_selected_sources()
+    with tab_relacionamentos:
+        render_relationship_manager()
 
 
 def open_source_manager():
@@ -266,15 +479,18 @@ def open_source_manager():
 
 
 def render_source_summary_sidebar():
-    phase1_state()
+    phase_state()
     st.markdown("### Fontes")
     sources = st.session_state.get("active_dremio_sources", [])
+    relationships = st.session_state.get("source_relationships", [])
     if sources and st.session_state.get("dremio_engine"):
         st.success(f"Dremio · {len(sources)} view(s)")
         for src in sources[:3]:
             st.caption(src["name"])
         if len(sources) > 3:
             st.caption(f"+ {len(sources) - 3} outra(s)")
+        if relationships:
+            st.caption(f"Relacionamentos · {len(relationships)}")
     elif st.session_state.get("engine"):
         st.success(st.session_state.engine.engine_name)
         for item in st.session_state.get("loaded_files", [])[:3]:
@@ -290,9 +506,31 @@ def render_source_summary_sidebar():
             render_source_manager_content()
 
 
+def hydrate_workspace_from_conversation(conversation_id: str):
+    store = base_app.memory()
+    if not store or str(conversation_id).startswith("local-"):
+        return
+    conversation = store.get_conversation(conversation_id)
+    if not conversation:
+        return
+    st.session_state.active_dremio_sources = conversation.get("dremio_sources") or st.session_state.get("active_dremio_sources", [])
+    st.session_state.source_relationships = conversation.get("relationships") or []
+    st.session_state.pending_source_metadata = {
+        **dict(st.session_state.get("pending_source_metadata") or {}),
+        "dremio_sources": st.session_state.active_dremio_sources,
+        "relationships": st.session_state.source_relationships,
+    }
+    apply_agent_workspace_context()
+
+
+def load_conversation_bigdados(conversation_id: str):
+    base_app._original_load_conversation(conversation_id)
+    hydrate_workspace_from_conversation(conversation_id)
+
+
 def render_sidebar_bigdados():
     inject_sidebar_compact_css()
-    phase1_state()
+    phase_state()
     _, _, model = base_app.get_vertex_config()
     with st.sidebar:
         st.title(APP_NAME)
@@ -315,11 +553,17 @@ def render_sidebar_bigdados():
         st.markdown("### Sessão")
         if st.button("Nova análise", use_container_width=True):
             base_app.reset_workspace(keep_auth=True)
+            st.session_state.conversation_id = None
+            st.session_state.messages = []
             st.session_state.active_dremio_sources = []
+            st.session_state.source_relationships = []
+            st.session_state.source_columns_by_path = {}
             st.rerun()
         if st.session_state.get("authenticated") and st.button("Trocar PAT / sair", use_container_width=True):
             base_app.reset_workspace(keep_auth=False)
             st.session_state.active_dremio_sources = []
+            st.session_state.source_relationships = []
+            st.session_state.source_columns_by_path = {}
             st.rerun()
 
 
@@ -396,6 +640,7 @@ def render_chat_with_history_first():
         st.info(NO_SOURCE_MESSAGE)
         return
 
+    apply_agent_workspace_context()
     user_input = st.chat_input("Pergunte algo sobre os dados...")
     if not user_input:
         base_app.render_download_buttons()
@@ -442,9 +687,13 @@ def render_chat_with_history_first():
     st.rerun()
 
 
+if not hasattr(base_app, "_original_load_conversation"):
+    base_app._original_load_conversation = base_app.load_conversation
+
 base_app.render_sidebar = render_sidebar_bigdados
 base_app.render_auth_gate = render_auth_gate_bigdados
 base_app.render_chat = render_chat_with_history_first
+base_app.load_conversation = load_conversation_bigdados
 
 if __name__ == "__main__":
     base_app.main()
