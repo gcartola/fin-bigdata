@@ -9,37 +9,58 @@ def inject_auth_visual_refinement():
     st.markdown(
         """
         <style>
+          main .block-container {
+            padding-top: 1.25rem !important;
+            padding-bottom: 1rem !important;
+          }
+
           .bigdados-auth-shell {
             width: min(448px, 92vw) !important;
             max-width: 448px !important;
-            margin-top: 8vh !important;
-            gap: 12px !important;
+            margin: 2.2vh auto 0 auto !important;
+            gap: 8px !important;
+            align-items: stretch !important;
           }
 
           .bigdados-login-logo {
-            width: min(180px, 34vw) !important;
-            max-height: 138px !important;
-            margin-bottom: 2px !important;
+            width: min(154px, 30vw) !important;
+            max-height: 116px !important;
+            margin: 0 auto 0 auto !important;
           }
 
           .bigdados-auth-card {
             width: 100% !important;
             box-sizing: border-box !important;
-            padding: 20px 22px !important;
-            background: color-mix(in srgb, var(--secondary-background-color) 74%, transparent) !important;
-            border-color: color-mix(in srgb, var(--text-color) 12%, transparent) !important;
+            padding: 18px 22px !important;
+            border-radius: 20px !important;
+            background: color-mix(in srgb, var(--secondary-background-color) 70%, transparent) !important;
+            border-color: color-mix(in srgb, var(--text-color) 10%, transparent) !important;
           }
 
           .bigdados-auth-title {
-            font-size: 23px !important;
+            font-size: 22px !important;
+            margin-bottom: 8px !important;
           }
 
           .bigdados-auth-subtitle {
-            font-size: 13px !important;
+            font-size: 12.5px !important;
+            line-height: 1.38 !important;
             font-weight: 560 !important;
-            color: color-mix(in srgb, var(--text-color) 80%, transparent) !important;
+            color: color-mix(in srgb, var(--text-color) 82%, transparent) !important;
           }
 
+          .bigdados-auth-input-wrap {
+            width: min(448px, 92vw) !important;
+            max-width: 448px !important;
+            margin: 12px auto 0 auto !important;
+            padding: 0 !important;
+            border: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+          }
+
+          .bigdados-auth-input-wrap div[data-testid="stTextInput"],
+          .bigdados-auth-input-wrap div[data-testid="stButton"],
           main div[data-testid="stTextInput"],
           main div[data-testid="stButton"] {
             width: min(448px, 92vw) !important;
@@ -48,11 +69,19 @@ def inject_auth_visual_refinement():
             margin-right: auto !important;
           }
 
+          .bigdados-auth-input-wrap div[data-testid="stButton"] {
+            margin-top: 8px !important;
+          }
+
           main .stAlert {
             width: min(448px, 92vw) !important;
             max-width: 448px !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
+            margin: 12px auto 0 auto !important;
+          }
+
+          main .stAlert > div {
+            width: 100% !important;
+            box-sizing: border-box !important;
           }
         </style>
         """,
