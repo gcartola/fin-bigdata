@@ -1,3 +1,6 @@
+import base64
+from pathlib import Path
+
 import streamlit as st
 
 st.set_page_config(page_title="BigDados", page_icon="🎲", layout="wide")
@@ -12,7 +15,32 @@ import app_phase12 as phase12
 entry = phase12.entry
 phase10 = phase12.phase10
 
-BIGDADOS_ICON_BASE64 = phase12.BIGDADOS_FAVICON_PNG_BASE64
+
+def load_asset_base64(candidates: list[str], fallback_base64: str | None = None) -> str:
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists() and path.is_file():
+            return base64.b64encode(path.read_bytes()).decode("utf-8")
+    return fallback_base64 or phase12.BIGDADOS_FAVICON_PNG_BASE64
+
+
+BIGDADOS_FAVICON_BASE64 = load_asset_base64(
+    [
+        "assets/icon-favicon-bd.png",
+        "assets/favicon-bd.png",
+        "assets/icon-bd.png",
+    ]
+)
+
+BIGDADOS_LOGO_BASE64 = load_asset_base64(
+    [
+        "assets/logo_bd.png",
+        "assets/bigdados-logo.png",
+        "assets/bigdados_logo.png",
+        "assets/icon-bd.png",
+    ],
+    fallback_base64=BIGDADOS_FAVICON_BASE64,
+)
 
 
 def force_bigdados_branding():
@@ -20,7 +48,7 @@ def force_bigdados_branding():
         f"""
         <script>
         const title = "BigDados";
-        const href = "data:image/png;base64,{BIGDADOS_ICON_BASE64}";
+        const href = "data:image/png;base64,{BIGDADOS_FAVICON_BASE64}";
         function applyBranding() {{
           const doc = window.parent.document;
           if (doc.title !== title) doc.title = title;
@@ -51,21 +79,21 @@ def render_auth_gate_safe_logo() -> bool:
           [data-testid="stSidebar"] {{ filter: blur(1.8px); opacity: 0.56; }}
           .bigdados-auth-shell {{
             max-width: 560px;
-            margin: 3.2vh auto 0 auto;
+            margin: 2.2vh auto 0 auto;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
             align-items: stretch;
           }}
           .bigdados-login-logo {{
-            width: 88px;
-            height: 88px;
+            display: block;
+            width: min(220px, 38vw);
+            max-height: 128px;
             object-fit: contain;
             margin: 0 auto 0 auto;
-            border-radius: 18px;
           }}
           .bigdados-auth-card {{
-            padding: 22px 26px;
+            padding: 20px 26px;
             border-radius: 22px;
             border: 1px solid color-mix(in srgb, var(--text-color) 18%, transparent);
             background: color-mix(in srgb, var(--secondary-background-color) 92%, transparent);
@@ -73,7 +101,7 @@ def render_auth_gate_safe_logo() -> bool:
             box-shadow: 0 18px 60px rgba(0, 0, 0, 0.18);
           }}
           .bigdados-auth-title {{
-            font-size: 27px;
+            font-size: 26px;
             line-height: 1.12;
             font-weight: 850;
             letter-spacing: -0.03em;
@@ -98,7 +126,7 @@ def render_auth_gate_safe_logo() -> bool:
           .stAlert {{ max-width: 560px; margin-left: auto; margin-right: auto; }}
         </style>
         <div class="bigdados-auth-shell">
-          <img class="bigdados-login-logo" src="data:image/png;base64,{BIGDADOS_ICON_BASE64}" />
+          <img class="bigdados-login-logo" src="data:image/png;base64,{BIGDADOS_LOGO_BASE64}" />
           <div class="bigdados-auth-card">
             <div class="bigdados-auth-title">Desbloquear {entry.APP_NAME}</div>
             <div class="bigdados-auth-subtitle">
