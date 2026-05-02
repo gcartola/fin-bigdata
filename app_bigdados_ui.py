@@ -12,22 +12,20 @@ def inject_auth_visual_refinement():
         f"""
         <style>
           main .block-container {{
-            padding-top: 1.25rem !important;
+            padding-top: 0.25rem !important;
             padding-bottom: 1rem !important;
           }}
 
           .bigdados-auth-shell {{
             width: {AUTH_BOX_WIDTH} !important;
             max-width: 448px !important;
-            margin: 2.2vh auto 0 auto !important;
-            gap: 8px !important;
+            margin: 0.25vh auto 0 auto !important;
+            gap: 0 !important;
             align-items: stretch !important;
           }}
 
           .bigdados-login-logo {{
-            width: min(154px, 30vw) !important;
-            max-height: 116px !important;
-            margin: 0 auto 0 auto !important;
+            display: none !important;
           }}
 
           .bigdados-auth-card {{
